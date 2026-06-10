@@ -3,10 +3,6 @@
     "acdp": {
       "command": "${USERPROFILE}/.acode/bin/acdp.exe"
     },
-    "cgc": {
-      "command": "${USERPROFILE}/.acode/bin/cgc.exe",
-      "args": ["mcp", "start"]
-    },
     "arag": {
       "command": "${USERPROFILE}/.acode/bin/arag.exe",
       "args": ["mcp", "start"]
