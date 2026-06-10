@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "arag": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/mcp-guard.js", "local"]
+    },
+    "arag-global": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/mcp-guard.js", "global"]
+    }
+  }
+}
