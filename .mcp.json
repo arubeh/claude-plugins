@@ -2,10 +2,6 @@
   "mcpServers": {
     "acdp": {
       "command": "${USERPROFILE}/.acode/bin/acdp.exe"
-    },
-    "arag": {
-      "command": "${USERPROFILE}/.acode/bin/arag.exe",
-      "args": ["mcp", "start"]
     }
   }
 }
