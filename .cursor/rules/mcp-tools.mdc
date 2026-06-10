@@ -1,0 +1,113 @@
+---
+description: MCP ツール（cgc, acdp 等）が有効な場合の利用ガイドライン。編集前の影響範囲把握、専用ツール優先利用、cgc-check マーカー。
+alwaysApply: true
+---
+
+# MCP ツール利用ガイドライン
+
+MCP (Model Context Protocol) サーバーが有効な場合、専用ツールを優先利用する。grep/find/sed では取れない構造的・意味的な文脈が得られる。
+
+## 基本原則
+
+1. 作業開始時に有効な MCP サーバーを確認（`mcp__<server>__*` 形式のツール）
+2. MCP が提供する機能は MCP 経由で行う（grep の代替ではなく補完）
+3. 編集前に影響範囲を把握する（特に cgc）
+
+## cgc (Code Graph Context)
+
+ソースコード構造解析。シンボル単位でインデックス済み。
+
+### 編集前に必ず実行（cgc 有効 + 対象がインデックス済み）
+
+1. `mcp__cgc__context(symbol)` — シンボルの 360 度ビュー
+2. `mcp__cgc__impact(symbol)` — 呼び出し元・テスト・リスクレベル
+
+### 使う場面
+
+- 既存シンボル編集前の影響範囲確認
+- リネーム: `mcp__cgc__rename`（grep+sed より正確）
+- デッドコード検出: `mcp__cgc__find_dead_code`
+- コールチェーン把握: `find_callers`, `find_callees`, `find_call_chain`
+- シンボル/コード片の検索: `find_code`, `find_literal`
+- 影響を受けるテスト特定: `affected_tests`
+- DB カラム変更の波及: `column_impact`, `column_invariants`
+- 複雑度評価: `most_complex_functions`, `cyclomatic_complexity`
+
+### Graph 鮮度確認（重要・編集前必須）
+
+`cgc mcp start --watch` は inotify ベースの**増分**追従であり、**プロジェクト構造の大改変（例: `apps/x/` → `crates/x-cli/`）を検知しない**。古いシンボルが graph に残り、`context()` / `impact()` が **stale path を返す**。
+
+**stale 検知シグナル**（どれか 1 つでも該当したら graph 不信）:
+
+1. `mcp__cgc__context(<symbol>)` の返却 path が現存しない
+2. `mcp__cgc__list_repositories` の path が現在の repo root と一致しない
+3. graph build 時刻が `git log -1 --format=%ct` より明確に古い
+
+**stale 検知時の対応**: `cgc index .` を Bash から実行（cgc は cross-platform CLI）→ `mcp__cgc__reload_graph` でリロード。
+
+**禁止**: 「session の権限外」と判断して skip / waiver「未登録」を流用 / grep で代替して終わる。
+
+### resolver の弱点と rg フォールバック (言語中立)
+
+cgc は **call graph には強いが、type reference (型参照) には弱い**。これは特定言語の問題ではなく cgc 全対応言語に共通する構造的弱点。
+
+**空振りシグナル** (型を取りこぼしている兆候): `find_callers(<TypeName>)` が明らかな参照を返さない / `impact(<TypeName>)` の callers が定義ファイル内に閉じる / 複数ファイル使用のはずが 0 件か極端に少ない。
+
+**フォールバック原則** (言語特化の cheatsheet は持たない):
+
+| 用途 | 一次ツール |
+|------|----------|
+| 関数呼び出しの追跡 | cgc (`find_callers` / `impact`) |
+| 型 (class / struct / interface / enum / trait など) の参照 | **rg** |
+| import / use / require 等の依存宣言文 | **rg** |
+| 型注釈位置 (引数 / 戻り値 / フィールド / ジェネリクス) | **rg** |
+| 修飾名による参照 (`a.b.T` / `a::b::T` 等) | **rg** |
+
+**rg の汎用パターン** (概念で覚える):
+
+- 全参照: `rg "<Symbol>"`
+- 言語フィルタ: `rg "<Symbol>" --type <lang>` (`rg --type-list` で確認)
+- 完全一致: `rg "\b<Symbol>\b"`
+- 依存宣言文に絞る: `rg "(import|use|require|from).*<Symbol>"` 等
+
+resolver 強化が完了すれば不要になる暫定運用。`[cgc-check]` マーカーは rg フォールバック使用時も省略しない。
+
+### 使わない場面（waiver — 厳格）
+
+- cgc グラフに**真に未登録**（新規ファイル / `cgc index` 未実行の repo / `cgc list-repositories` で listed されていない）
+- ドキュメント・設定ファイル（`.md`, `.yml`, `.json`, `.toml`）
+- typo 修正・コメント追加・フォーマット修正等の軽微変更
+
+**stale graph と resolver の弱点は waiver に含まれない**（それぞれ上記の手順で対処）。
+
+### cgc-check マーカー
+
+cgc 有効なソースコード編集時、編集ツール呼び出し直前のメッセージに 1 行含める:
+
+```
+[cgc-check] symbol=<name> risk=<LOW|MEDIUM|HIGH|CRITICAL> callers=<N>
+```
+
+## acdp (Browser MCP)
+
+E2E テスト・UI 動作確認（CDP ベース、Playwright MCP 互換）。
+
+- テスト仕様書がある場合: `/ui-test` スキル経由
+- 手動確認: `browser_navigate` → `browser_snapshot` → 各種操作
+- 使わない場面: ユニットテスト完結 / バックエンドのみの変更
+
+## 利用判断フロー
+
+| 作業 | MCP 有効時 | MCP 無効時 |
+|------|----------|----------|
+| コードのシンボル編集（インデックス済み） | cgc context + impact 必須 | grep/Read |
+| 新規ファイル / 未インデックスファイル編集 | cgc waiver、Edit/Write 直接 | 同左 |
+| UI 動作確認 | acdp で実機確認 | ユーザーに手動確認を案内 |
+| ドキュメント・設定編集 | MCP 不要、Edit/Write 直接 | 同左 |
+
+## チェックリスト
+
+- [ ] 有効な MCP サーバーを把握した
+- [ ] cgc 有効 + コード変更で `context()` + `impact()` を実行した
+- [ ] `[cgc-check]` マーカーを編集前メッセージに含めた
+- [ ] UI 変更で acdp が有効な場合、ブラウザ確認を行った

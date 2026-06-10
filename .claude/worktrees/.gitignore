@@ -1,0 +1,7 @@
+# issue-flow 並列モード / Agent isolation:"worktree" の作業ディレクトリ。
+# 配下の worktree は git で追跡しない (各 worktree 内部に独自の .git があり、
+# 親リポからは中身を覗かない方が混乱がない)。
+# skeleton 自体 (このファイル) は repo に残し、`/issue-flow` 起動時の
+# 警告チェックを満たす。
+*
+!.gitignore

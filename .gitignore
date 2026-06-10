@@ -1,0 +1,50 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+vendor/
+.venv/
+venv/
+__pycache__/
+
+# Build outputs
+dist/
+build/
+out/
+target/
+*.o
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Coverage
+coverage/
+.nyc_output/
+htmlcov/
+
+# Review outputs
+.claude/reviews/*.md
+.cursor/reviews/*.md
+
+# acdp (Browser MCP) outputs
+test-results/
+references/
+
+# Claude Code runtime state (ScheduleWakeup / /loop dynamic runner lock)
+.claude/scheduled_tasks.lock

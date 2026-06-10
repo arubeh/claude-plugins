@@ -1,0 +1,42 @@
+---
+description: Git/GitHub ワークフロー（1 Issue = 1 ブランチ = 1 PR、ブランチ命名・コミット・PR規約）
+alwaysApply: true
+---
+
+# Git & GitHub ワークフロー
+
+## 基本原則
+
+**1 Issue = 1 ブランチ = 1 PR**
+
+## ブランチ命名
+
+```
+<type>/#<issue番号>-<短い説明>
+```
+
+| ラベル | プレフィックス |
+|--------|--------------|
+| enhancement, feature | `feat/` |
+| bug | `fix/` |
+| documentation, docs | `docs/` |
+| refactor | `refactor/` |
+| test | `test/` |
+| ラベルなし | `feat/` |
+
+例: `feat/#42-search-pagination`, `fix/#99-login-error`
+
+## コミットメッセージ
+
+```
+<type>(#<issue>): <説明>
+```
+
+例: `feat(#42): 検索結果のページネーションを追加`
+
+## PR 規約
+
+- タイトル: `<type>(#<issue>): <説明>`（70文字以内）
+- 本文に **Closes #<issue>** を含める（マージ時に Issue 自動クローズ）
+- テストプランを記載
+- マージ: **Squash merge** 推奨（`gh pr merge <number> --squash`）
