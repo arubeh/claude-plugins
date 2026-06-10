@@ -8,8 +8,8 @@
     {
       "name": "arag-memory",
       "source": "./plugins/arag-memory",
-      "description": "arag を記憶バックエンドにした Claude Code 継続学習プラグイン。recall/capture を二層（フック＋MCP）で行い、汎用知識は全PJ共通 global へ自動昇格。インストール=オプトイン・未参加PJでは no-op。",
-      "version": "0.2.1",
+      "description": "arag を記憶バックエンドにした Claude Code 継続学習プラグイン。recall/capture を二層（フック＋MCP）で行い、汎用化リライト済みの知識のみ全PJ共通 global へ自動昇格（安定 id upsert・重複ガード付き）。インストール=オプトイン・未参加PJでは no-op。",
+      "version": "0.2.2",
       "author": {
         "name": "arubeh"
       },
