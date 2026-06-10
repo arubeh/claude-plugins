@@ -54,6 +54,37 @@ function slugify(s) {
   );
 }
 
+// add-text 用のコンテンツ由来安定 id（#5）。セッション等の実行文脈を含めないことで、
+// 同じ知識が別セッション・別PJで再キャプチャされても同一 id → upsert で 1 件に収束する。
+// （_captured/ の raw アーカイブ名は従来どおりセッション付きで履歴を保持する）
+function stableId(it) {
+  return `${it.type || 'lesson'}_${slugify(U.scrubSecrets(it.title || ''))}`;
+}
+
+// タイトル正規化（重複ガード用）: 空白・主要な句読点/記号を除去して小文字化。
+function normTitle(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[\s　]+/gu, '')
+    .replace(/[。、，．.,!?！？「」『』()（）\[\]#*\-_:：;；]/gu, '');
+}
+
+// global 昇格前の重複ガード（#5）: 既存 global に正規化タイトルが一致する知識があれば
+// 取り込みをスキップする。同一 id は add-text の upsert が収束させるため、ここで防ぐのは
+// 旧形式 id（セッション依存/ id なし）の遺産や type 違い同名による二重化。
+// 検索失敗・旧 arag（json 非対応）は fail-open（取り込む）。
+function isDupInGlobal(it, { cwd }) {
+  const title = U.scrubSecrets(it.title || '');
+  const want = normTitle(title);
+  if (!want) return false;
+  const r = U.searchBm25(title, { cwd, project: U.GLOBAL_PROJECT, topK: 3, timeoutMs: 5000 });
+  if (!r.ok) return false;
+  return (r.hits || []).some((h) => {
+    const firstLine = String(h.preview || h.text || '').split(/\r?\n/)[0].replace(/^#\s*/, '');
+    return normTitle(firstLine) === want;
+  });
+}
+
 // 永続 raw ストア（§7 raw アーカイブ）`./.arag/_captured/` へ capture doc を書き出す。
 // 一時ファイルにしないことで arag の source が安定パスになり、再インデックス/監査もできる。
 function writeCapturedFiles(proj, items, originProject, sessionId) {
@@ -81,7 +112,7 @@ function supportsAddText() {
 
 // 1 項目を `arag add-text` 用ペイロードに分解する（arag#66）。
 // frontmatter を本文に入れず metadata(JSON) で渡すことでノイズチャンク化を防ぎ、
-// id（_captured ファイル名 base・安定）で再取込時に upsert、source に本来の出典
+// id（コンテンツ由来・セッション非依存 #5）で再取込時に upsert、source に本来の出典
 // （Issue/PR 等）を載せて検索結果から辿れるようにする。
 function toAddTextPayload(c, originProject) {
   const it = c.item;
@@ -99,7 +130,7 @@ function toAddTextPayload(c, originProject) {
   const title = U.scrubSecrets(it.title || '(untitled)');
   const body = U.scrubSecrets(it.body || '');
   return {
-    id: path.basename(c.file, '.md'),
+    id: stableId(it),
     text: `# ${title}\n\n${body}\n`,
     metadata,
     source: it.source || path.join('_captured', path.basename(c.file)),
@@ -178,9 +209,12 @@ function main() {
   // 永続 raw（§7）へ書き出し → local には全件、global には scope=org && confidence=known のみ
   // を同じファイルから add（§1.6⑤ 自動昇格ゲート）。
   const captured = writeCapturedFiles(proj, items, originProject, input.session_id);
-  const promoteCaptured = captured.filter(
+  const promoteCandidates = captured.filter(
     (c) => c.item.scope === 'org' && c.item.confidence === 'known'
   );
+  // 昇格前の重複ガード（#5）: 既存 global と正規化タイトルが一致する項目は昇格しない。
+  const dupSkipped = promoteCandidates.filter((c) => isDupInGlobal(c.item, { cwd: proj }));
+  const promoteCaptured = promoteCandidates.filter((c) => !dupSkipped.includes(c));
   const promoteItems = promoteCaptured.map((c) => c.item);
 
   const locRes = aragAddTexts(captured, { cwd: proj, originProject });
@@ -213,6 +247,10 @@ function main() {
   if (promoteCaptured.length) {
     parts.push(color.green(`⬆️  global 昇格 ${globRes.count}/${promoteCaptured.length} 件 (scope=org・confidence=known)`));
     for (const it of promoteItems.slice(0, globRes.count)) parts.push(color.green(`     • ${it.title || ''}`));
+  }
+  if (dupSkipped.length) {
+    parts.push(color.yellow(`↩️  global 重複スキップ ${dupSkipped.length} 件 (既存と同一タイトル)`));
+    for (const c of dupSkipped) parts.push(color.yellow(`     • ${U.scrubSecrets(c.item.title || '')}`));
   }
   process.stderr.write(parts.join('\n') + '\n');
 
