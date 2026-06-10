@@ -1,6 +1,6 @@
 {
   "name": "arag-memory",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "arag を記憶バックエンドにした Claude Code 学習ループ。SessionStart/UserPromptSubmit で recall 注入、SessionEnd で capture（local 書き込み＋scope=org 高確度の自動 global 昇格＋色付き通知）。インストール=オプトイン、未参加 PJ では no-op。",
   "author": {
     "name": "arubeh"
