@@ -68,7 +68,81 @@ function writeCapturedFiles(proj, items, originProject, sessionId) {
   });
 }
 
+// arag が `add-text` (arag#66・v0.7.0 より後) に対応しているか 1 回だけ probe する。
+// help 出力（stderr）に "add-text" が含まれるかで判定（バージョン文字列に依存しない）。
+let addTextSupport = null;
+function supportsAddText() {
+  if (addTextSupport === null) {
+    const r = U.runArag(['help'], { timeoutMs: 5000 });
+    addTextSupport = /add-text/.test((r.stdout || '') + (r.stderr || ''));
+  }
+  return addTextSupport;
+}
+
+// 1 項目を `arag add-text` 用ペイロードに分解する（arag#66）。
+// frontmatter を本文に入れず metadata(JSON) で渡すことでノイズチャンク化を防ぎ、
+// id（_captured ファイル名 base・安定）で再取込時に upsert、source に本来の出典
+// （Issue/PR 等）を載せて検索結果から辿れるようにする。
+function toAddTextPayload(c, originProject) {
+  const it = c.item;
+  const metadata = {
+    type: it.type || 'lesson',
+    date: it.date || '',
+    source: it.source || '',
+    status: it.status || 'provisional',
+    scope: it.scope || 'project',
+    confidence: it.confidence || 'inferred',
+    epistemic: it.epistemic || 'inferred',
+  };
+  if (it.scope === 'org') metadata.origin_project = originProject;
+  if (it.slug) metadata.slug = it.slug;
+  const title = U.scrubSecrets(it.title || '(untitled)');
+  const body = U.scrubSecrets(it.body || '');
+  return {
+    id: path.basename(c.file, '.md'),
+    text: `# ${title}\n\n${body}\n`,
+    metadata,
+    source: it.source || path.join('_captured', path.basename(c.file)),
+    tags: [metadata.type, metadata.scope],
+  };
+}
+
+// flock 下で `arag [--project P] add-text --id .. --source .. --metadata .. -` する
+// （本文は stdin・コマンドライン長制限回避）。旧 arag（add-text 非対応）は従来の
+// `arag add` 経路へ自動フォールバック（fail-open 原則）。
+function aragAddTexts(captured, { cwd, project, originProject }) {
+  if (!captured.length) return { ok: true, count: 0 };
+  if (!supportsAddText()) {
+    return aragAddFiles(captured.map((c) => c.file), { cwd, project });
+  }
+  const lockName = project ? `arag-global-${project}` : 'arag-local';
+  const release = U.acquireLock(path.join(os.tmpdir(), lockName + '.lock'), { timeoutMs: 8000 });
+  if (!release) return { ok: false, count: 0, reason: 'lock-timeout' };
+  try {
+    let count = 0;
+    for (const c of captured) {
+      const p = toAddTextPayload(c, originProject);
+      const args = [];
+      if (project) args.push('--project', project); // グローバル指定はサブコマンド前
+      args.push(
+        'add-text',
+        '--id', p.id,
+        '--source', p.source,
+        '--metadata', JSON.stringify(p.metadata),
+        '--tags', p.tags.join(','),
+        '-'
+      );
+      const r = U.runArag(args, { cwd, input: p.text, timeoutMs: 60000 }); // 全再構築のため長め
+      if (r.ok) count++;
+    }
+    return { ok: true, count };
+  } finally {
+    release();
+  }
+}
+
 // flock（mkdir ロック）下で `arag [--project P] add <file>...` する。
+// （旧 arag 用フォールバック経路。add-text 対応バイナリでは aragAddTexts が使われる）
 function aragAddFiles(files, { cwd, project }) {
   if (!files.length) return { ok: true, count: 0 };
   // ロック対象は data-dir 単位。local は ./.arag、global は _global を共有ロック名で代表。
@@ -104,15 +178,17 @@ function main() {
   // 永続 raw（§7）へ書き出し → local には全件、global には scope=org && confidence=known のみ
   // を同じファイルから add（§1.6⑤ 自動昇格ゲート）。
   const captured = writeCapturedFiles(proj, items, originProject, input.session_id);
-  const localFiles = captured.map((c) => c.file);
   const promoteCaptured = captured.filter(
     (c) => c.item.scope === 'org' && c.item.confidence === 'known'
   );
   const promoteItems = promoteCaptured.map((c) => c.item);
-  const globalFiles = promoteCaptured.map((c) => c.file);
 
-  const locRes = aragAddFiles(localFiles, { cwd: proj });
-  const globRes = aragAddFiles(globalFiles, { cwd: proj, project: U.GLOBAL_PROJECT });
+  const locRes = aragAddTexts(captured, { cwd: proj, originProject });
+  const globRes = aragAddTexts(promoteCaptured, {
+    cwd: proj,
+    project: U.GLOBAL_PROJECT,
+    originProject,
+  });
 
   // 記憶マップ（SessionStart 用）更新
   const recent = U.readJsonSafe(U.recentFile(proj), { items: [] });
@@ -133,9 +209,9 @@ function main() {
   // 色付きサマリ（即時表示はホスト依存のため best-effort・SessionStart 再掲が確実な経路）
   const { color } = U;
   const parts = [];
-  parts.push(color.cyan(`🗃  arag capture: local ${locRes.count}/${localFiles.length} 件保存`));
-  if (globalFiles.length) {
-    parts.push(color.green(`⬆️  global 昇格 ${globRes.count}/${globalFiles.length} 件 (scope=org・confidence=known)`));
+  parts.push(color.cyan(`🗃  arag capture: local ${locRes.count}/${captured.length} 件保存`));
+  if (promoteCaptured.length) {
+    parts.push(color.green(`⬆️  global 昇格 ${globRes.count}/${promoteCaptured.length} 件 (scope=org・confidence=known)`));
     for (const it of promoteItems.slice(0, globRes.count)) parts.push(color.green(`     • ${it.title || ''}`));
   }
   process.stderr.write(parts.join('\n') + '\n');
