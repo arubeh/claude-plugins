@@ -7,6 +7,15 @@
 //   5. 記憶マップ更新＋昇格通知を残す＋色付きサマリを出力
 //   6. 下書きをクリア
 // 毎ターンは書かない（重い全再構築は critical path 外）。
+//
+// ★ 早期 kill 耐性（#7）: Claude Code はセッション終了時に本フックを hooks.json の
+// timeout を待たずプロセスツリーごと kill することがある（実測: 4 件中 1 件取込済みで死亡
+// ×2 セッション）。対策は「kill 窓の最小化」と「再実行の冪等化」の 2 本柱:
+//   - kill 窓の最小化: arag が `add-text --batch` (arag#69) に対応していれば、local 全件
+//     /global 昇格分を各 1 プロセスの JSONL 一括取込で流す（N 回 spawn のモデルロード × N を畳む）
+//   - 再実行の冪等化: index は stable id の upsert で収束、raw アーカイブ `_captured/` も
+//     stable id 名で上書きされ重複バッチが発生しない。途中 kill されても下書きが残る限り
+//     次セッションの SessionEnd が同じ結果に収束する
 
 const fs = require('fs');
 const path = require('path');
@@ -56,7 +65,7 @@ function slugify(s) {
 
 // add-text 用のコンテンツ由来安定 id（#5）。セッション等の実行文脈を含めないことで、
 // 同じ知識が別セッション・別PJで再キャプチャされても同一 id → upsert で 1 件に収束する。
-// （_captured/ の raw アーカイブ名は従来どおりセッション付きで履歴を保持する）
+// （#7 で _captured/ の raw アーカイブ名もこの id に統一。再実行は同名上書き = 冪等）
 function stableId(it) {
   return `${it.type || 'lesson'}_${slugify(U.scrubSecrets(it.title || ''))}`;
 }
@@ -87,27 +96,28 @@ function isDupInGlobal(it, { cwd }) {
 
 // 永続 raw ストア（§7 raw アーカイブ）`./.arag/_captured/` へ capture doc を書き出す。
 // 一時ファイルにしないことで arag の source が安定パスになり、再インデックス/監査もできる。
-function writeCapturedFiles(proj, items, originProject, sessionId) {
+// ファイル名は stable id（#7）: フックが途中 kill され次セッションで再実行されても
+// 同名上書きとなり、セッション id 違いの同一内容 raw が蓄積しない。
+function writeCapturedFiles(proj, items, originProject) {
   const dir = path.join(U.localDataDir(proj), '_captured');
   fs.mkdirSync(dir, { recursive: true });
-  const sid = String(sessionId || 's').slice(0, 8);
-  return items.map((it, i) => {
-    const name = `${it.date || 'undated'}_${sid}_${i}_${slugify(it.title)}.md`;
-    const file = path.join(dir, name);
+  return items.map((it) => {
+    const file = path.join(dir, `${stableId(it)}.md`);
     fs.writeFileSync(file, toDoc(it, originProject));
     return { file, item: it };
   });
 }
 
-// arag が `add-text` (arag#66・v0.7.0 より後) に対応しているか 1 回だけ probe する。
-// help 出力（stderr）に "add-text" が含まれるかで判定（バージョン文字列に依存しない）。
-let addTextSupport = null;
-function supportsAddText() {
-  if (addTextSupport === null) {
+// arag CLI の対応機能を 1 回だけ probe する。help 出力に "add-text" (arag#66) /
+// "add-text --batch" (arag#69) が含まれるかで判定（バージョン文字列に依存しない）。
+let cliCaps = null;
+function aragCliCaps() {
+  if (cliCaps === null) {
     const r = U.runArag(['help'], { timeoutMs: 5000 });
-    addTextSupport = /add-text/.test((r.stdout || '') + (r.stderr || ''));
+    const txt = (r.stdout || '') + (r.stderr || '');
+    cliCaps = { addText: /add-text/.test(txt), batch: /add-text --batch/.test(txt) };
   }
-  return addTextSupport;
+  return cliCaps;
 }
 
 // 1 項目を `arag add-text` 用ペイロードに分解する（arag#66）。
@@ -138,23 +148,38 @@ function toAddTextPayload(c, originProject) {
   };
 }
 
-// flock 下で `arag [--project P] add-text --id .. --source .. --metadata .. -` する
-// （本文は stdin・コマンドライン長制限回避）。旧 arag（add-text 非対応）は従来の
-// `arag add` 経路へ自動フォールバック（fail-open 原則）。
+// flock 下で arag へ取り込む。経路は能力に応じて 3 段:
+//   1. `add-text --batch` (arag#69): 全件を 1 プロセス・JSONL 一括 upsert。kill 窓最小（#7 の本命）
+//   2. `add-text` per-item (arag#66): 1 件ずつ spawn（batch 非対応 / batch 失敗時の部分回収）
+//   3. `arag add <file>` : 旧 arag 用フォールバック（fail-open 原則）
 function aragAddTexts(captured, { cwd, project, originProject }) {
   if (!captured.length) return { ok: true, count: 0 };
-  if (!supportsAddText()) {
+  const caps = aragCliCaps();
+  if (!caps.addText) {
     return aragAddFiles(captured.map((c) => c.file), { cwd, project });
   }
   const lockName = project ? `arag-global-${project}` : 'arag-local';
   const release = U.acquireLock(path.join(os.tmpdir(), lockName + '.lock'), { timeoutMs: 8000 });
   if (!release) return { ok: false, count: 0, reason: 'lock-timeout' };
   try {
-    let count = 0;
-    for (const c of captured) {
-      const p = toAddTextPayload(c, originProject);
+    const payloads = captured.map((c) => toAddTextPayload(c, originProject));
+
+    if (caps.batch) {
+      // JSONL 一括（オール・オア・ナッシング）。失敗時は per-item へ落として部分回収を試みる
+      const jsonl = payloads
+        .map((p) => JSON.stringify({ text: p.text, id: p.id, source: p.source, metadata: p.metadata, tags: p.tags }))
+        .join('\n') + '\n';
       const args = [];
       if (project) args.push('--project', project); // グローバル指定はサブコマンド前
+      args.push('add-text', '--batch');
+      const r = U.runArag(args, { cwd, input: jsonl, timeoutMs: 60000 });
+      if (r.ok) return { ok: true, count: payloads.length };
+    }
+
+    let count = 0;
+    for (const p of payloads) {
+      const args = [];
+      if (project) args.push('--project', project);
       args.push(
         'add-text',
         '--id', p.id,
@@ -208,7 +233,7 @@ function main() {
 
   // 永続 raw（§7）へ書き出し → local には全件、global には scope=org && confidence=known のみ
   // を同じファイルから add（§1.6⑤ 自動昇格ゲート）。
-  const captured = writeCapturedFiles(proj, items, originProject, input.session_id);
+  const captured = writeCapturedFiles(proj, items, originProject);
   const promoteCandidates = captured.filter(
     (c) => c.item.scope === 'org' && c.item.confidence === 'known'
   );

@@ -51,7 +51,14 @@ arag-memory/
 
 ## 永続 raw ストア
 
-capture は一時ファイルでなく **`./.arag/_captured/<date>_<sid>_<i>_<slug>.md` に永続書き出し**（§7 の **raw アーカイブ**・監査用）したうえで、**`arag add-text --id <type>_<slug(title)> --source <出典> --metadata <JSON> -`** で取り込む（v0.2.0 / arag#66、id のコンテンツ由来化は v0.2.2 / #5）。id がセッション非依存のため、**同じ知識は別セッション・別 PJ から再キャプチャされても upsert で 1 件に収束**する（raw アーカイブ名は従来どおりセッション付きで履歴保持）。frontmatter は本文に入れず metadata で渡すためノイズチャンク化せず、`source` には Issue/PR 等の本来の出典が載る（arag 側で added_at / channel / added_by / host も自動記録）。global 昇格は同項目を `--project _global` で add-text し、**昇格前に既存 global と正規化タイトルが一致する項目はスキップ**する（旧形式 id の遺産との二重化防止・スキップは色付きサマリに表示）。**旧 arag（add-text 非対応）では従来の `arag add` へ自動フォールバック**する。
+capture は一時ファイルでなく **`./.arag/_captured/<type>_<slug(title)>.md` に永続書き出し**（§7 の **raw アーカイブ**・監査用）したうえで、**`arag add-text --batch`（arag#69・JSONL 一括）または `arag add-text --id <type>_<slug(title)> --source <出典> --metadata <JSON> -`** で取り込む（v0.2.0 / arag#66、id のコンテンツ由来化は v0.2.2 / #5、kill 耐性・raw 名の stable id 化・batch 取込は v0.2.3 / #7）。id・raw ファイル名ともセッション非依存のため、**同じ知識は別セッション・別 PJ から再キャプチャされても upsert / 同名上書きで 1 件に収束**する。frontmatter は本文に入れず metadata で渡すためノイズチャンク化せず、`source` には Issue/PR 等の本来の出典が載る（arag 側で added_at / channel / added_by / host も自動記録）。global 昇格は同項目を `--project _global` で add-text し、**昇格前に既存 global と正規化タイトルが一致する項目はスキップ**する（旧形式 id の遺産との二重化防止・スキップは色付きサマリに表示）。**フォールバックは 3 段**: batch 非対応 arag では per-item add-text、add-text 非対応の旧 arag では `arag add`（fail-open 原則）。
+
+### 早期 kill 耐性（v0.2.3 / #7）
+
+Claude Code はセッション終了時に SessionEnd フックを hooks.json の timeout を待たず**プロセスツリーごと kill することがある**（実測: per-item 取込 4 件中 1 件で死亡 ×2 セッション → 残り 3 件が検索不能・pending 未クリアで raw 重複が蓄積）。対策:
+
+- **kill 窓の最小化**: `add-text --batch` で local 全件 / global 昇格分を各 1 プロセスに畳む（モデルロード × N を排除。実測 4 件 ~9s → batch 部 ~2s）
+- **再実行の冪等化**: 途中 kill で下書きが残っても、次セッションの再実行が stable id upsert・raw 同名上書き・global 重複ガードで同じ結果に収束する
 
 ## 動作確認済み（arag 0.6.0・実データ）
 
