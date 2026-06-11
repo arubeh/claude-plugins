@@ -1,7 +1,7 @@
 {
   "name": "acdp-browser",
-  "version": "0.1.0",
-  "description": "acdp (Browser/CDP) の MCP 提供プラグイン。Playwright MCP 互換の browser_* ツールでブラウザを直接操作（UI 動作確認・E2E・/ui-test）。acdp バイナリ不在の環境では 0 tools で静かに無効化（.acdp-disabled で PJ 単位オプトアウト）。",
+  "version": "0.2.0",
+  "description": "acdp (Browser/CDP) の MCP 提供プラグイン。Playwright MCP 互換の browser_* ツールでブラウザを直接操作（UI 動作確認・E2E）。/ui-test スキルと ui-tester エージェントを同梱。acdp バイナリ不在の環境では 0 tools で静かに無効化（.acdp-disabled で PJ 単位オプトアウト）。",
   "author": {
     "name": "arubeh"
   },
