@@ -18,12 +18,16 @@ claude-plugins/
 │   │   ├── .mcp.json                    arag(local) + arag-global（mcp-guard 経由）
 │   │   ├── bin/                         フック実装（Node・依存ゼロ）
 │   │   └── skills/                      /arag-capture /arag-recall /arag-consolidate
-│   └── cgc-guard/                    cgc 連携（編集前 impact ゲート + 差分 index 自動化）
-│       ├── .claude-plugin/plugin.json   マニフェスト（version 2 箇所同期は arag-memory と同様）
-│       ├── hooks/hooks.json             SessionStart / PreToolUse / PostToolUse
-│       ├── .mcp.json                    cgc（mcp-guard 経由・未参加 PJ は 0 tools）
-│       ├── bin/                         フック実装（Node・依存ゼロ）
-│       └── skills/                      /cgc-impact /cgc-refresh
+│   ├── cgc-guard/                    cgc 連携（編集前 impact ゲート + 差分 index 自動化）
+│   │   ├── .claude-plugin/plugin.json   マニフェスト（version 2 箇所同期は arag-memory と同様）
+│   │   ├── hooks/hooks.json             SessionStart / PreToolUse / PostToolUse
+│   │   ├── .mcp.json                    cgc（mcp-guard 経由・未参加 PJ は 0 tools）
+│   │   ├── bin/                         フック実装（Node・依存ゼロ）
+│   │   └── skills/                      /cgc-impact /cgc-refresh
+│   └── acdp-browser/                 acdp (Browser/CDP) の MCP 提供（フック・スキル無し）
+│       ├── .claude-plugin/plugin.json   マニフェスト（version 2 箇所同期は同様）
+│       ├── .mcp.json                    acdp（mcp-guard 経由・バイナリ不在は 0 tools）
+│       └── bin/mcp-guard.js             起動ガード（.acdp-disabled でオプトアウト）
 ├── .mcp.json                         このリポで開発するときの MCP（acdp / cgc / arag）
 └── README.md                         インストール・配布手順（ユーザー向け）
 ```
