@@ -6,6 +6,16 @@
   "description": "arubeh のクローズド配布プラグイン marketplace（claude-plugins リポに read 権限がある人だけが追加・インストール可能）",
   "plugins": [
     {
+      "name": "cgc-guard",
+      "source": "./plugins/cgc-guard",
+      "description": "cgc (Code Graph Context) 連携プラグイン。コード編集前の影響範囲確認（context+impact）を PreToolUse ゲートで強制し、編集・git 操作のたびに graph へ差分を自動適用（detached・冪等・SessionStart バックストップ付き）。未参加 PJ（.cgc 無し）では no-op。",
+      "version": "0.1.0",
+      "author": {
+        "name": "arubeh"
+      },
+      "keywords": ["cgc", "code-graph", "impact", "blast-radius", "guard", "index"]
+    },
+    {
       "name": "arag-memory",
       "source": "./plugins/arag-memory",
       "description": "arag を記憶バックエンドにした Claude Code 継続学習プラグイン。recall/capture を二層（フック＋MCP）で行い、汎用化リライト済みの知識のみ全PJ共通 global へ自動昇格（安定 id upsert・重複ガード付き）。インストール=オプトイン・未参加PJでは no-op。",
