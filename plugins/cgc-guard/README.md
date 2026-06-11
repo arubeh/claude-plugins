@@ -1,7 +1,7 @@
 # cgc-guard プラグイン
 
-> **状態: Phase 1 実装済み・スモークテスト合格（2026-06-11）**。本 README が仕様の単一ソース。
-> 残: `claude --plugin-dir` での実セッション検証（deny → Claude の自動是正挙動）→ marketplace 登録（Phase 2）→ acode 撤去（Phase 3）。
+> **状態: Phase 1 実装済み・スモークテスト合格、Phase 2 marketplace 登録済み v0.1.0（2026-06-11）**。本 README が仕様の単一ソース。
+> 残: `/plugin install cgc-guard@arubeh-plugins` 後の実セッション検証（deny → Claude の自動是正挙動）→ acode 撤去（Phase 3）。
 
 cgc (Code Graph Context) 連携を acode テンプレート埋め込みから外出しした Claude Code プラグイン。
 2 つの自動化を提供する:
