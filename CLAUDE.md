@@ -24,10 +24,12 @@ claude-plugins/
 │   │   ├── .mcp.json                    cgc（mcp-guard 経由・未参加 PJ は 0 tools）
 │   │   ├── bin/                         フック実装（Node・依存ゼロ）
 │   │   └── skills/                      /cgc-impact /cgc-refresh
-│   └── acdp-browser/                 acdp (Browser/CDP) の MCP 提供（フック・スキル無し）
+│   └── acdp-browser/                 acdp (Browser/CDP) の MCP 提供 + UI テストワークフロー
 │       ├── .claude-plugin/plugin.json   マニフェスト（version 2 箇所同期は同様）
 │       ├── .mcp.json                    acdp（mcp-guard 経由・バイナリ不在は 0 tools）
-│       └── bin/mcp-guard.js             起動ガード（.acdp-disabled でオプトアウト）
+│       ├── bin/mcp-guard.js             起動ガード（.acdp-disabled でオプトアウト）
+│       ├── agents/                      ui-tester（UI テスト実行サブエージェント）
+│       └── skills/                      /ui-test（仕様書ベースの UI テスト）
 ├── .mcp.json                         このリポで開発するときの MCP（acdp / cgc / arag）
 └── README.md                         インストール・配布手順（ユーザー向け）
 ```
