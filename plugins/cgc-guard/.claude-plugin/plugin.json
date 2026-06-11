@@ -1,0 +1,10 @@
+{
+  "name": "cgc-guard",
+  "version": "0.1.0",
+  "description": "cgc (Code Graph Context) 連携プラグイン。コード編集前の影響範囲確認（context+impact）を PreToolUse ゲートで強制し、編集・git 操作のたびに graph へ差分を自動適用（detached・冪等・SessionStart バックストップ付き）。未参加 PJ（.cgc 無し）では no-op。",
+  "author": {
+    "name": "arubeh"
+  },
+  "keywords": ["cgc", "code-graph", "impact", "blast-radius", "guard", "index"],
+  "mcpServers": "./.mcp.json"
+}
