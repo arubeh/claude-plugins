@@ -2,10 +2,16 @@
 // MCP 起動ガードラッパー（arag-memory の mcp-guard.js と同方式）。
 // プラグインの .mcp.json はユーザー全体で登録されるため、cgc を使わない PJ でも起動を
 // 試みる。本ラッパーが参加判定し:
-//   - 参加（graph.json あり + cgc バイナリあり + .cgc-disabled 無し）→ `cgc mcp start` を中継
-//     （--watch は cgc 既定で ON: セッション中の増分追従はこれが担う）
-//   - 不参加 → 空の MCP サーバとして接続（0 tools・"failed" 表示を出さない）
+//   - 参加（cgc バイナリあり + .cgc-disabled 無し + graph.json あり or git リポ）
+//     → `cgc mcp start` を中継（--watch は cgc 既定で ON: セッション中の増分追従はこれが担う）。
+//     graph.json が無くても git リポなら中継する: cgc mcp start の起動時自動インデックスが
+//     `.cgc/` を新規作成してグラフを構築するため、事前の `cgc index .` は不要。
+//   - 不参加（cgc 不在 / .cgc-disabled / 非 git かつ graph 無し）
+//     → 空の MCP サーバとして接続（0 tools・"failed" 表示を出さない）。
+//     非 git フォルダ（ホームディレクトリ等）を誤って丸ごとスキャンしないための安全弁。
 
+const fs = require('fs');
+const path = require('path');
 const { spawnSync } = require('child_process');
 const U = require('./lib/util');
 
@@ -39,7 +45,7 @@ function runEmptyMcpServer(reason) {
           result: {
             protocolVersion: (msg.params && msg.params.protocolVersion) || '2025-06-18',
             capabilities: { tools: { listChanged: false } },
-            serverInfo: { name: 'cgc-guard (inactive)', version: '0.1.0' },
+            serverInfo: { name: 'cgc-guard (inactive)', version: '0.1.1' },
             instructions: `cgc ツールは現在無効です（${reason}）。プロジェクトで \`cgc index .\` を実行すると次セッションから有効化されます。`,
           },
         });
@@ -69,8 +75,14 @@ function main() {
     runEmptyMcpServer('cgc バイナリが見つかりません');
     return;
   }
-  if (!U.isParticipating(proj)) {
-    runEmptyMcpServer('このPJは未参加 (.cgc/graph.json 無し、または .cgc-disabled)');
+  if (fs.existsSync(path.join(proj, '.cgc-disabled'))) {
+    runEmptyMcpServer('.cgc-disabled によりオプトアウト済み');
+    return;
+  }
+  // graph.json 不在でも git リポなら起動する（cgc mcp start の起動時自動インデックスが
+  // .cgc/ を作成する）。git リポでもないフォルダだけは inactive に倒す。
+  if (!fs.existsSync(U.graphFile(proj)) && !fs.existsSync(path.join(proj, '.git'))) {
+    runEmptyMcpServer('git リポジトリではないため自動インデックスしません (.cgc/graph.json も無し)');
     return;
   }
 
