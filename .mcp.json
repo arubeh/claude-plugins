@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "acdp": {
-      "command": "${USERPROFILE}/.acode/bin/acdp.exe"
-    }
-  }
-}
