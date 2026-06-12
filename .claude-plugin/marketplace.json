@@ -9,7 +9,7 @@
       "name": "cgc-guard",
       "source": "./plugins/cgc-guard",
       "description": "cgc (Code Graph Context) 連携プラグイン。コード編集前の影響範囲確認（context+impact）を PreToolUse ゲートで強制し、編集・git 操作のたびに graph へ差分を自動適用（detached・冪等・SessionStart バックストップ付き）。git リポなら .cgc 無しでも MCP 起動時に自動インデックスで参加（.cgc-disabled でオプトアウト）。非 git フォルダでは no-op。",
-      "version": "0.1.1",
+      "version": "0.3.0",
       "author": {
         "name": "arubeh"
       },
@@ -18,8 +18,8 @@
     {
       "name": "acdp-browser",
       "source": "./plugins/acdp-browser",
-      "description": "acdp (Browser/CDP) の MCP 提供プラグイン。Playwright MCP 互換の browser_* ツールでブラウザを直接操作（UI 動作確認・E2E）。/ui-test スキルと ui-tester エージェントを同梱。acdp バイナリ不在の環境では 0 tools で静かに無効化（.acdp-disabled で PJ 単位オプトアウト）。",
-      "version": "0.3.0",
+      "description": "acdp (Browser/CDP) の MCP 提供プラグイン。Playwright MCP 互換の browser_* ツールでブラウザを直接操作（UI 動作確認・E2E）。/ui-test スキルと ui-tester エージェントを同梱。headless / headed / extension（Chrome 拡張経由でログイン済み実ブラウザを操作）の 3 モードを .acdp.json / ACDP_MODE で切り替え可能（/acdp-mode スキル同梱）。acdp バイナリ不在の環境では 0 tools で静かに無効化（.acdp-disabled で PJ 単位オプトアウト）。",
+      "version": "0.4.0",
       "author": {
         "name": "arubeh"
       },

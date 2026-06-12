@@ -3,19 +3,32 @@
 // プラグインの .mcp.json はユーザー全体で登録されるため、acdp を使わない環境でも起動を
 // 試みる。本ラッパーが利用可否を判定し:
 //   - 利用可（acdp バイナリあり + .acdp-disabled 無し）
-//     → acdp バイナリを中継（acdp は引数なしで MCP サーバとして起動する）。
+//     → acdp バイナリを中継（モード設定に応じた CLI フラグを付与）。
 //       ブラウザの起動は acdp 側が初回ツール呼び出しまで遅延する。
 //   - 利用不可（acdp 不在 / .acdp-disabled）
 //     → 空の MCP サーバとして接続（0 tools・"failed" 表示を出さない）。
 // cgc と異なりプロジェクト参加の概念は無い（ブラウザ操作はどの PJ でも意味を持つ）ため、
 // 判定はバイナリ存在とオプトアウトの 2 点のみ。依存ゼロ（Node 組み込みのみ）。
+//
+// ---- モード切り替え ----
+// acdp は launch（隔離プロファイル起動: headless/headed）と extension（Chrome 拡張経由で
+// ログイン済み実ブラウザを駆動）の 2 バックエンドを持つ。どれを使うかを設定で切り替える:
+//   優先順: 環境変数 ACDP_MODE > <project>/.acdp.json > ~/.acode/acdp.json > 既定 headed
+//   mode: "headless" | "headed"（既定） | "extension"
+// 既定を headed にしているのは対話利用（操作を目視できる）優先のため。acdp バイナリ自体の
+// 既定（headless）とは異なる点に注意。CI 等では .acdp.json か ACDP_MODE=headless で明示する。
+// extension モードのペアリング値（port/token）はセッションを跨いで固定しないと拡張側で
+// 毎回再設定が必要になるため、port は既定 9333、token は ~/.acode/acdp-ext-token に
+// 自動生成・永続化して ACDP_EXT_TOKEN 環境変数で子プロセスへ渡す。
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
-const VERSION = '0.1.0';
+const VERSION = '0.4.0';
+const DEFAULT_EXT_PORT = 9333;
 
 // ---- acdp バイナリ解決（cgc-guard の resolveCgcBin / cgcAvailable と同方式）----
 
@@ -55,6 +68,64 @@ function acdpAvailable() {
   } catch { ok = false; }
   writeJsonSafe(cache, { ts: Date.now(), ok });
   return ok;
+}
+
+// ---- モード設定（headless / headed / extension）-------------------------------
+
+// プロジェクト .acdp.json がキー単位でユーザー ~/.acode/acdp.json を上書きする。
+// どちらも無ければ {}（= 既定 headless）。壊れた JSON は無視（fail-open）。
+function loadModeConfig(proj) {
+  const userCfg = readJsonSafe(path.join(os.homedir(), '.acode', 'acdp.json'), null) || {};
+  const projCfg = readJsonSafe(path.join(proj, '.acdp.json'), null) || {};
+  return { ...userCfg, ...projCfg };
+}
+
+// extension モードのペアリングトークン。優先順:
+// ACDP_EXT_TOKEN 環境変数 > 設定 extToken > ~/.acode/acdp-ext-token（無ければ自動生成・永続化）。
+// 永続化に失敗したら null を返し、token フラグを付けず acdp 側の起動時生成に任せる
+// （その場合はセッション毎に拡張側で再ペアリングが必要になるが、起動は止めない）。
+function resolveExtToken(cfg) {
+  if (process.env.ACDP_EXT_TOKEN) return process.env.ACDP_EXT_TOKEN;
+  if (typeof cfg.extToken === 'string' && cfg.extToken) return cfg.extToken;
+  const file = path.join(os.homedir(), '.acode', 'acdp-ext-token');
+  try {
+    const existing = fs.readFileSync(file, 'utf8').trim();
+    if (existing) return existing;
+  } catch { /* 未作成 → 生成へ */ }
+  const token = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, token + '\n', { mode: 0o600 });
+    return token;
+  } catch { return null; }
+}
+
+// 設定から acdp の CLI 引数と追加環境変数を組み立てる。
+// 不正な mode 値は既定の headed 扱い（fail-open）。
+function buildLaunchSpec(cfg) {
+  const args = [];
+  const env = {};
+  const mode = process.env.ACDP_MODE || cfg.mode || 'headed';
+  if (mode === 'extension') {
+    args.push('--backend', 'extension');
+    const port = Number.isInteger(cfg.extPort) && cfg.extPort > 0 ? cfg.extPort : DEFAULT_EXT_PORT;
+    args.push('--ext-port', String(port));
+    const token = resolveExtToken(cfg);
+    if (token) env.ACDP_EXT_TOKEN = token;
+    // extension モードの --headed は「操作対象タブの前面化」の意味
+    if (cfg.headed === true) args.push('--headed');
+  } else if (mode === 'headless') {
+    // acdp バイナリの既定が headless なのでフラグ不要
+  } else {
+    if (mode !== 'headed') {
+      process.stderr.write(`acdp-browser: 不明な mode "${mode}" のため既定の headed で起動します\n`);
+    }
+    args.push('--headed');
+  }
+  if (Array.isArray(cfg.args)) {
+    for (const a of cfg.args) if (typeof a === 'string') args.push(a);
+  }
+  return { args, env };
 }
 
 // ---- 空 MCP サーバ（0 tools・接続だけ成立させて "failed" 表示を防ぐ）----------
@@ -126,10 +197,12 @@ function main() {
     return;
   }
 
-  const r = spawnSync(resolveAcdpBin(), [], {
+  const { args, env } = buildLaunchSpec(loadModeConfig(proj));
+  const r = spawnSync(resolveAcdpBin(), args, {
     cwd: proj,
     stdio: 'inherit',
     windowsHide: true,
+    env: { ...process.env, ...env },
   });
   process.exit(r.status === null ? 1 : r.status);
 }
