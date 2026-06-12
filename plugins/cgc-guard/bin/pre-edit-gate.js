@@ -51,11 +51,18 @@ function main() {
   }
 
   // record-evidence.js が記録した mcp__cgc__* 実行証跡。
+  // evidenceScope='dir' (v0.3.0) では同一ディレクトリの別ファイルへの証跡も
+  // 編集を許可する — 機械的な複数ファイル一括編集（全パーサーへ 1 行追加等）で
+  // ファイルごとに context+impact を強要する儀式コストをなくす。
   const now = Date.now();
   const ev = U.readJsonSafe(U.evidenceFile(proj, input.session_id), { entries: [] });
   const entries = Array.isArray(ev.entries) ? ev.entries : [];
+  const targetDir = normDir(path.dirname(String(target)));
+  const matchesTarget = (p) =>
+    p.toLowerCase().endsWith(base) ||
+    (cfg.evidenceScope === 'dir' && normDir(path.dirname(p)) === targetDir);
   const fileHit = entries.some(
-    (e) => now - e.ts < ttlFileMs && Array.isArray(e.paths) && e.paths.some((p) => p.endsWith(base))
+    (e) => now - e.ts < ttlFileMs && Array.isArray(e.paths) && e.paths.some(matchesTarget)
   );
   const sessionHit = entries.some((e) => now - e.ts < ttlSessionMs);
   if (fileHit || sessionHit) {
@@ -99,6 +106,20 @@ function main() {
     `次のメッセージに「[cgc-skip reason=<理由>]」を1行出力してから再実行する。` +
     `\n(型シンボルで impact が空振りする場合は rg で参照を確認してから [cgc-check] を出すこと)`;
 
+  // risk 段階化 (v0.3.0): セッション内の impact でこのファイル/ディレクトリの
+  // risk が denyRiskFloor 未満（既定: LOW/MEDIUM）と判明している場合、証跡 TTL が
+  // 切れていても deny せず warn に降格する。リスクはコードの性質であって
+  // TTL より長持ちする。HIGH/CRITICAL・未知（未計測）は従来どおり deny。
+  if (knownRiskBelowFloor(entries, cfg, matchesTarget)) {
+    U.emitWarn(
+      message.replace(
+        '編集前に影響範囲を確認してください。',
+        `影響範囲は既知の低リスク (denyRiskFloor=${cfg.denyRiskFloor}) のため編集は許可。`
+      ) + '\n[reason=RISK_DEMOTED]'
+    );
+    return;
+  }
+
   // 小規模リポは deny を warn に降格 (#189-3): 儀式コスト > 便益になりやすい。
   if (effectiveMode(cfg, proj) === 'warn') {
     U.emitWarn(
@@ -111,6 +132,26 @@ function main() {
   }
 
   U.emitDeny(message);
+}
+
+// 区切り・大文字小文字を正規化したディレクトリ比較キー。
+function normDir(p) {
+  return String(p).replace(/\//g, '\\').toLowerCase();
+}
+
+const RISK_ORDER = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
+
+// このファイル（dir スコープ時は同ディレクトリ）に対するセッション内の
+// impact 計測値が、すべて denyRiskFloor 未満なら true。
+// 1 件でも floor 以上が観測されていれば false（deny 維持）。未計測も false。
+function knownRiskBelowFloor(entries, cfg, matchesTarget) {
+  const floor = RISK_ORDER[cfg.denyRiskFloor];
+  if (floor === undefined || floor <= 0) return false; // 'LOW' = 常時 deny（従来動作）
+  const risks = entries
+    .filter((e) => e.risk && Array.isArray(e.paths) && e.paths.some(matchesTarget))
+    .map((e) => RISK_ORDER[e.risk])
+    .filter((r) => r !== undefined);
+  return risks.length > 0 && risks.every((r) => r < floor);
 }
 
 // mode 解決: 明示設定が最優先。deny のままでも graph.json が小さい
