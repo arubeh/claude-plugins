@@ -96,29 +96,57 @@ Claude Code を開くだけで cgc が有効になる。
 
 ### 2. pre-edit-gate.js（編集前ゲート: deny 自動是正）
 
-PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー:
+PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー (0.2.0):
 
 ```
 対象 = tool_input.file_path
-1. 参加判定 NG                          → allow（無言・fail-open）
+1. 参加判定 NG / mode=off               → allow（無言・fail-open）
 2. 対象が非コード（.md/.json/.yml/.toml 等の拡張子 denylist）→ allow（waiver: ドキュメント・設定）
+2b. 対象がテストファイル（tests/・*_test.*・*.test.*・*.spec.*）→ allow（#189、excludeTests=false で無効化）
 3. 対象が新規ファイル（fs 不在 + Write）  → allow（既存シンボルへの影響なし。impact は参照側で取れる）
-4. 直近の assistant メッセージに [cgc-skip reason=...] マーカー → allow（明示 waiver: typo/コメント/フォーマット）
+3b. 承認済みファイル（同一セッションで一度ゲートを通過、approvalTtlMinutes 内）→ allow（#189）
+4. 直近の assistant メッセージに [cgc-skip reason=...] / [cgc-check] マーカー → allow
+   （注: 近年のハーネスは assistant text を transcript にほぼ永続化しないため best-effort。#185）
 5. 証跡あり（下記 record-evidence: TTL 内 + 対象ファイル一致 or セッションレベル一致）→ allow
-6. それ以外 → deny:
+5b. transcript の tool_use エントリに TTL 内の mcp cgc context/impact 実行あり → allow
+   （#185 フォールバック: tool_use エントリは text と違い確実に永続化される）
+6. それ以外 → deny（mode=warn / 小規模リポは allow + 注意喚起に降格）:
    permissionDecision: "deny"
-   reason: 「<file> の編集前に mcp__cgc__context(<推定symbol>) と mcp__cgc__impact を実行し、
-           [cgc-check] symbol=... risk=... callers=N を出力してから再実行してください。
-           軽微変更（typo/コメント/フォーマット）なら [cgc-skip reason=...] を出力して再実行。」
+   reason: 「<file> の編集前に … [reason=<理由コード> deny=N/M] …」
 ```
 
-- **無限ループ防止**: deny の是正手段（impact 実行 or `[cgc-skip]`）はどちらも次回判定で必ず allow に到達する。同一ファイルへの deny は連続 2 回まで、3 回目は警告付き allow に降格（フェイルセーフ）。
+- **理由コード（#185）**: deny 文に `[reason=...]` を必ず含める。
+  `MARKER_AND_EVIDENCE_MISSING`（証跡もマーカーも無い）/ `EVIDENCE_TTL_EXPIRED`（証跡が古い）/
+  `EVIDENCE_FILE_MISMATCH`（新しい証跡はあるが対象ファイルに紐づかない）。無駄な再試行の試行錯誤を防ぐ。
+- **無限ループ防止**: deny の是正手段（impact 実行 or `[cgc-skip]`）はどちらも次回判定で必ず allow に到達する。同一ファイルへの deny は連続 denyMax（既定 2）回まで、超過で警告付き allow に降格（フェイルセーフ）。
 - **削除のゲート**: ファイル削除は Bash (`rm`/`git rm`) 経由が主。v1 では PreToolUse(Bash) に `rm|git rm` パターンマッチを追加し、対象がインデックス済みコードなら同じ証跡判定を行う（v1 スコープに含めるが、誤検知が多ければ警告注入へ降格可）。
 - 証跡の一致判定 v1: **ファイルレベル一致**（証跡の paths に対象ファイルが含まれる）を優先し、無ければ **セッションレベル TTL**（直近 5 分以内に何らかの impact 実行あり）で allow。厳しすぎる場合の調整ノブとして実装する。
 
+#### 設定: `.cgc-guard.json`（#189: ゲート強度のプロジェクト単位調整）
+
+プロジェクトルートに置く。無ければ既定値。
+
+```json
+{
+  "mode": "deny",            // "deny" | "warn"（注意喚起のみ・編集は許可）| "off"
+  "excludeTests": true,       // tests/・*_test.*・*.test.*・*.spec.* をゲート対象外に
+  "smallRepoWarnBytes": 131072, // graph.json がこのサイズ未満なら deny→warn に自動降格。0 で無効
+  "fileTtlMinutes": 10,       // ファイルレベル証跡の有効期間
+  "sessionTtlMinutes": 5,     // セッションレベル証跡の有効期間
+  "approvalTtlMinutes": 60,   // 一度通過したファイルの承認持続時間
+  "denyMax": 2                // 同一ファイル連続 deny 上限
+}
+```
+
+caller 閾値による自動 allow（#189 提案 2）は、ゲート内から cgc を同期 spawn する
+コストが PreToolUse の時間予算に合わないため見送り（将来 record-evidence が
+impact 応答から callers 数を抽出して証跡に同梱する形で再検討）。
+
 ### 3. record-evidence.js（証跡記録）
 
-PostToolUse(matcher: `mcp__cgc__context|mcp__cgc__impact|mcp__cgc__reload_graph`) で発火。
+PostToolUse(matcher: `mcp__cgc__.*|mcp__plugin_.*_cgc__.*`) で発火。プラグイン経由の
+MCP はツール名が `mcp__plugin_cgc-guard_cgc__*` に名前空間化されるため、素の
+`mcp__cgc__*` だけにマッチする旧 matcher では一度も発火しなかった（#185 の主因）。
 `tool_input`（symbol）と `tool_response` に含まれるファイルパスを抽出し、
 `.cgc/tmp/evidence-<session_id>.json` に追記（TTL 10 分・最大 50 件・サイズ上限あり）。
 `.cgc/tmp/` は `.cgc/.gitignore` 対象に追加する。

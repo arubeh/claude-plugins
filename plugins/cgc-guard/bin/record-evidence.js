@@ -10,8 +10,12 @@ const KEEP_MS = 30 * 60 * 1000; // 証跡保持期間
 const MAX_ENTRIES = 50;
 const MAX_PATHS = 80;
 
-// 証跡として意味のあるツールのみ（read 系の網羅は不要。ゲートの TTL 判定に使うものだけ）
-const RELEVANT = /^mcp__cgc__(context|impact|find_callers|find_callees|affected_tests|reload_graph)$/;
+// 証跡として意味のあるツールのみ（read 系の網羅は不要。ゲートの TTL 判定に使うものだけ）。
+// #185: プラグイン経由ではツール名が mcp__plugin_<plugin>_cgc__* に名前空間化される。
+// 旧正規表現 (^mcp__cgc__) はこれに一切マッチせず、証跡が常に空 → ゲートが
+// 規定手順を踏んでも deny する主因だった。両形式を許容する。
+const RELEVANT =
+  /^mcp__(?:plugin_[A-Za-z0-9_-]+_)?cgc__(context|impact|find_callers|find_callees|affected_tests|reload_graph)$/;
 
 function main() {
   const input = U.readHookInput();

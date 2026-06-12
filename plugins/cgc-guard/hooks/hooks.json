@@ -35,7 +35,7 @@
         ]
       },
       {
-        "matcher": "mcp__cgc__.*",
+        "matcher": "mcp__cgc__.*|mcp__plugin_.*_cgc__.*",
         "hooks": [
           {
             "type": "command",
