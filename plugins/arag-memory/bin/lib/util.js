@@ -187,6 +187,51 @@ function scrubSecrets(text) {
   return out;
 }
 
+// ---- recall フロア & セッション内既出抑制（#14 / arag#81 の plugin 側）---------
+// 小コーパスで BM25 上位が常に同じ無関係文書になり、recall が「ノイズ垂れ流し」になる
+// のを止める。フロア＝関連度の低い注入を出さない（ゼロ注入＞無関係注入）。既出抑制＝
+// 同一セッションで一度出した文書を以後は出さない（アラーム疲れの回避）。
+
+// `ARAG_RECALL_MIN_SCORE`（`RAG_` fallback）→ 関連度フロア（number|null）。未設定/不正は null。
+function recallFloor() {
+  return parseFloor(process.env.ARAG_RECALL_MIN_SCORE || process.env.RAG_RECALL_MIN_SCORE);
+}
+function parseFloor(v) {
+  if (v == null || String(v).trim() === '') return null;
+  const f = Number(v);
+  return Number.isFinite(f) ? f : null;
+}
+// score がフロア未満のヒットを落とす純粋関数（floor=null は素通し＝従来挙動）。
+function applyFloor(hits, floor) {
+  if (floor == null) return hits || [];
+  return (hits || []).filter((h) => typeof h.score === 'number' && h.score >= floor);
+}
+
+// セッション内既出抑制の有効可否（既定 ON・`ARAG_RECALL_SESSION_DEDUP=0/false/off/no` で OFF）。
+function sessionDedupEnabled() {
+  const v = (process.env.ARAG_RECALL_SESSION_DEDUP || '').trim().toLowerCase();
+  return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
+}
+function recallSeenFile(proj) {
+  return path.join(localDataDir(proj), '_recall-seen.json'); // セッション単位の既出文書集合
+}
+// hits を「既出キー集合 seen に無いもの」だけへ絞る純粋関数（#14・テスト容易）。
+// keyOf(h) がキー（falsy のヒットは抑制対象外＝常に残す）。返り値 {kept, keys}
+// （keys=新たに採用した非 falsy キー列。呼び出し側が seen に積み増す）。
+function dedupAgainstSeen(hits, seen, keyOf) {
+  const set = seen instanceof Set ? seen : new Set(seen || []);
+  const kept = [];
+  const keys = [];
+  for (const h of hits || []) {
+    const k = keyOf(h);
+    if (!k) { kept.push(h); continue; }
+    if (set.has(k)) continue;
+    kept.push(h);
+    keys.push(k);
+  }
+  return { kept, keys };
+}
+
 // ---- JSON I/O ヘルパ -------------------------------------------------------
 
 function readJsonSafe(file, fallback) {
@@ -234,6 +279,8 @@ module.exports = {
   resolveAragBin, runArag, searchBm25,
   acquireLock, sleepSync,
   scrubSecrets,
+  recallFloor, parseFloor, applyFloor,
+  sessionDedupEnabled, recallSeenFile, dedupAgainstSeen,
   readJsonSafe, writeJsonSafe, readHookInput, emitContext,
   color,
 };
