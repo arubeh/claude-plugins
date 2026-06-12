@@ -220,10 +220,120 @@ function aragAddFiles(files, { cwd, project }) {
   }
 }
 
+// ---- Claude ネイティブ・ファイルメモリの同期（#15 / arag#82 の plugin 側）--------
+// Claude Code は ~/.claude/projects/<encoded>/memory/*.md に独自の記憶を書く（arag とは
+// 別系統）。capture が細いと recall(global) が枯れるため、SessionEnd で opt-in 同期する。
+// arag CLI `sync-claude-memory` はファイル直読みで scrub できないため、ここでは
+// フック側で読み→秘密スクラブ→既存 add-text 経路で upsert する（秘密除外を担保）。
+
+// 絶対パスを Claude の projects 配下ディレクトリ名へ符号化（: \ / → -）。arag CLI と同規則。
+function claudeMemoryDir(proj) {
+  const encoded = String(proj).replace(/[:\\/]/g, '-');
+  return path.join(os.homedir(), '.claude', 'projects', encoded, 'memory');
+}
+
+// .md の frontmatter（name/description/type）と本文を分解する軽量パーサ（arag CLI と同形式）。
+function parseMemoryMd(content) {
+  const text = String(content || '').replace(/\r\n/g, '\n');
+  let name = null, description = null, type = null, body = text.trim();
+  const m = text.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  if (m) {
+    body = m[2].trim();
+    for (const line of m[1].split('\n')) {
+      const t = line.trim();
+      let mm;
+      if (name == null && (mm = t.match(/^name:\s*(.+)$/))) name = mm[1].trim().replace(/^"|"$/g, '');
+      else if (description == null && (mm = t.match(/^description:\s*(.+)$/))) description = mm[1].trim().replace(/^"|"$/g, '');
+      else if (type == null && (mm = t.match(/^type:\s*(.+)$/))) type = mm[1].trim().replace(/^"|"$/g, '');
+    }
+  }
+  return { name, description, type, body };
+}
+
+// メモリディレクトリから add-text payload 群を組み立てる（MEMORY.md 索引は除外・秘密スクラブ済み）。
+// id=`claude-mem:<name>` で冪等。本文が空なら除外。テスト容易なよう dir を引数で受ける。
+function buildMemoryPayloads(dir) {
+  let names;
+  try { names = fs.readdirSync(dir); } catch { return []; }
+  const files = names
+    .filter((n) => n.toLowerCase().endsWith('.md') && n.toLowerCase() !== 'memory.md')
+    .sort();
+  const payloads = [];
+  for (const n of files) {
+    let content;
+    try { content = fs.readFileSync(path.join(dir, n), 'utf8'); } catch { continue; }
+    const p = parseMemoryMd(content);
+    if (!p.body.trim()) continue;
+    const nm = p.name || n.replace(/\.md$/i, '');
+    const title = U.scrubSecrets(nm);
+    const body = U.scrubSecrets(p.body);
+    payloads.push({
+      id: `claude-mem:${nm}`,
+      text: `# ${title}\n\n${body}\n`,
+      source: path.join(dir, n),
+      metadata: {
+        origin: 'claude-memory',
+        name: nm,
+        type: p.type || null,
+        description: p.description ? U.scrubSecrets(p.description) : null,
+      },
+      tags: p.type ? [p.type] : [],
+    });
+  }
+  return payloads;
+}
+
+// payload 群を flock 下で arag へ upsert する（batch 優先・per-item フォールバック）。
+function upsertPayloads(payloads, { cwd, project }) {
+  if (!payloads.length) return { ok: true, count: 0 };
+  if (!aragCliCaps().addText) return { ok: false, count: 0, reason: 'old-arag' };
+  const lockName = project ? `arag-global-${project}` : 'arag-local';
+  const release = U.acquireLock(path.join(os.tmpdir(), lockName + '.lock'), { timeoutMs: 8000 });
+  if (!release) return { ok: false, count: 0, reason: 'lock-timeout' };
+  try {
+    if (aragCliCaps().batch) {
+      const jsonl = payloads.map((p) => JSON.stringify(p)).join('\n') + '\n';
+      const args = [];
+      if (project) args.push('--project', project);
+      args.push('add-text', '--batch');
+      const r = U.runArag(args, { cwd, input: jsonl, timeoutMs: 60000 });
+      if (r.ok) return { ok: true, count: payloads.length };
+    }
+    let count = 0;
+    for (const p of payloads) {
+      const args = [];
+      if (project) args.push('--project', project);
+      args.push('add-text', '--id', p.id, '--source', p.source, '--metadata', JSON.stringify(p.metadata), '--tags', p.tags.join(','), '-');
+      const r = U.runArag(args, { cwd, input: p.text, timeoutMs: 60000 });
+      if (r.ok) count++;
+    }
+    return { ok: true, count };
+  } finally {
+    release();
+  }
+}
+
+// Claude ファイルメモリ → arag(_global) を同期（#15・opt-in）。戻り値 {ok, count}。
+function syncClaudeFileMemory(proj) {
+  const payloads = buildMemoryPayloads(claudeMemoryDir(proj));
+  return upsertPayloads(payloads, { cwd: proj, project: U.GLOBAL_PROJECT });
+}
+
 function main() {
   const input = U.readHookInput();
   const proj = U.projectDir(input);
   if (!U.isParticipating(proj)) return;
+
+  // #15: Claude ネイティブ・ファイルメモリの global 同期（opt-in）。capture 枯渇(arag#82)対策。
+  // 既定 OFF: ネイティブ記憶を共有 global へ流すのは明示同意（環境変数）を要する。
+  if (/^(1|true|on|yes)$/i.test(String(process.env.ARAG_SYNC_CLAUDE_MEMORY || '').trim())) {
+    try {
+      const r = syncClaudeFileMemory(proj);
+      if (r.ok && r.count > 0) {
+        process.stderr.write(U.color.cyan(`🔁 Claude メモリ同期: global へ ${r.count} 件 upsert\n`));
+      }
+    } catch { /* fail-open: 同期失敗は capture 本体を止めない */ }
+  }
 
   const file = U.draftFile(proj);
   const items = parseDrafts(file);
@@ -283,4 +393,9 @@ function main() {
   try { fs.rmSync(file, { force: true }); } catch { /* noop */ }
 }
 
-try { main(); } catch (e) { try { process.stderr.write('arag session-end error: ' + e + '\n'); } catch {} }
+// 純粋関数はテスト用に公開（フック実行は直接起動時のみ）。
+module.exports = { claudeMemoryDir, parseMemoryMd, buildMemoryPayloads };
+
+if (require.main === module) {
+  try { main(); } catch (e) { try { process.stderr.write('arag session-end error: ' + e + '\n'); } catch {} }
+}
