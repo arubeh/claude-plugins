@@ -4,16 +4,19 @@
 // 仕様は plugins/cgc-guard/README.md「コンポーネント仕様 2」。
 //
 // allow（無言 exit 0）の条件 — どれか 1 つで素通り（fail-open 優先）:
-//   未参加 PJ / cgc 不在 / 非コードファイル / 新規ファイル Write /
-//   直近 assistant メッセージに [cgc-skip] or [cgc-check] / 証跡あり / deny 3 回目（降格）
+//   未参加 PJ / cgc 不在 / mode=off / 非コードファイル / テストファイル (#189) /
+//   新規ファイル Write / 承認済みファイル (#189) /
+//   直近 assistant メッセージに [cgc-skip] or [cgc-check] / 証跡あり /
+//   transcript に最近の cgc tool_use あり (#185) / deny 上限到達（降格）
+//
+// deny 時は理由コード [reason=...] を必ず含める (#185-3):
+//   MARKER_AND_EVIDENCE_MISSING — 証跡もマーカーも見つからない
+//   EVIDENCE_TTL_EXPIRED       — 証跡はあるが TTL 切れ
+//   EVIDENCE_FILE_MISMATCH     — 新しい証跡はあるが対象ファイルに紐づかない
 
 const fs = require('fs');
 const path = require('path');
 const U = require('./lib/util');
-
-const TTL_FILE_MS = 10 * 60 * 1000;    // ファイルレベル証跡の有効期間
-const TTL_SESSION_MS = 5 * 60 * 1000;  // セッションレベル証跡（緩和ノブ）
-const DENY_MAX = 2;                    // 同一ファイル連続 deny 上限（3 回目は降格 allow）
 
 function main() {
   const input = U.readHookInput();
@@ -21,45 +24,106 @@ function main() {
 
   if (!U.isParticipating(proj) || !U.cgcAvailable()) return; // fail-open
 
+  const cfg = U.loadGuardConfig(proj);
+  if (cfg.mode === 'off') return;
+
   const target = resolveTarget(input);
   if (!target) return;
   if (!U.isCodeFile(target)) return; // docs/設定 waiver
+  if (cfg.excludeTests && U.isTestPath(target)) return; // テスト編集は対象外 (#189-1)
   if (input.tool_name === 'Write' && !exists(target)) return; // 新規ファイルは既存シンボルへの影響なし
 
-  // 直近 assistant メッセージのマーカー（waiver / 自己申告の impact 実施証跡）
+  const ttlFileMs = cfg.fileTtlMinutes * 60 * 1000;
+  const ttlSessionMs = cfg.sessionTtlMinutes * 60 * 1000;
+  const approvalTtlMs = cfg.approvalTtlMinutes * 60 * 1000;
+  const base = path.basename(String(target)).toLowerCase();
+
+  // 一度確認を通したファイルは TTL 内は再確認不要 (#189-4)。
+  if (U.isApproved(proj, input.session_id, base, approvalTtlMs)) return;
+
+  // 直近 assistant メッセージのマーカー（waiver / 自己申告の impact 実施証跡）。
+  // ハーネスによっては text が transcript に残らないため best-effort (#185)。
   const lastText = U.lastAssistantText(input.transcript_path);
   if (/\[cgc-skip\b/.test(lastText)) return;
-  if (/\[cgc-check\]/.test(lastText)) return;
+  if (/\[cgc-check\]/.test(lastText)) {
+    U.recordApproval(proj, input.session_id, base, approvalTtlMs);
+    return;
+  }
 
-  // record-evidence.js が記録した mcp__cgc__* 実行証跡
+  // record-evidence.js が記録した mcp__cgc__* 実行証跡。
   const now = Date.now();
   const ev = U.readJsonSafe(U.evidenceFile(proj, input.session_id), { entries: [] });
   const entries = Array.isArray(ev.entries) ? ev.entries : [];
-  const base = path.basename(String(target)).toLowerCase();
   const fileHit = entries.some(
-    (e) => now - e.ts < TTL_FILE_MS && Array.isArray(e.paths) && e.paths.some((p) => p.endsWith(base))
+    (e) => now - e.ts < ttlFileMs && Array.isArray(e.paths) && e.paths.some((p) => p.endsWith(base))
   );
-  const sessionHit = entries.some((e) => now - e.ts < TTL_SESSION_MS);
-  if (fileHit || sessionHit) return;
+  const sessionHit = entries.some((e) => now - e.ts < ttlSessionMs);
+  if (fileHit || sessionHit) {
+    U.recordApproval(proj, input.session_id, base, approvalTtlMs);
+    return;
+  }
 
-  // 無限ループ防止: 同一ファイルへの deny は連続 DENY_MAX 回まで。超えたら降格 allow。
+  // フォールバック (#185): hooks.json の matcher 不一致や text 非永続化で
+  // 上の 2 経路が共倒れする環境向けに、transcript の tool_use エントリから
+  // context/impact 実行（TTL 内）を直接検出する。tool_use エントリは
+  // assistant text と違い確実に永続化される（実測済み）。
+  if (U.recentCgcToolUse(input.transcript_path, ttlFileMs)) {
+    U.recordApproval(proj, input.session_id, base, approvalTtlMs);
+    return;
+  }
+
+  // 無限ループ防止: 同一ファイルへの deny は連続 denyMax 回まで。超えたら降格 allow。
   const stateFile = U.denyStateFile(proj, input.session_id);
   const state = U.readJsonSafe(stateFile, {});
-  const rec = state[base] && now - state[base].ts < TTL_FILE_MS ? state[base] : { count: 0 };
+  const rec = state[base] && now - state[base].ts < ttlFileMs ? state[base] : { count: 0 };
   rec.count += 1;
   rec.ts = now;
   state[base] = rec;
   U.writeJsonSafe(stateFile, state);
-  if (rec.count > DENY_MAX) return; // フェイルセーフ降格
+  if (rec.count > cfg.denyMax) return; // フェイルセーフ降格
 
-  U.emitDeny(
+  // 理由コード (#185-3): 何が足りなかったかを明示し、無駄な再試行をなくす。
+  const hasFreshEvidence = entries.some((e) => now - e.ts < ttlFileMs);
+  const reason = entries.length === 0
+    ? 'MARKER_AND_EVIDENCE_MISSING'
+    : hasFreshEvidence
+      ? 'EVIDENCE_FILE_MISMATCH'
+      : 'EVIDENCE_TTL_EXPIRED';
+
+  const message =
     `[cgc-guard] ${target} はインデックス済みコードの可能性があります。編集前に影響範囲を確認してください。` +
+    `\n[reason=${reason} deny=${rec.count}/${cfg.denyMax}]` +
     `\n(1) mcp__cgc__context(<対象シンボル>) → mcp__cgc__impact(<対象シンボル>) を実行し、` +
     `次のメッセージに「[cgc-check] symbol=<name> risk=<LOW|MEDIUM|HIGH|CRITICAL> callers=<N>」を1行出力してから編集を再実行する。` +
     `\n(2) typo・コメント・フォーマット等の軽微変更、または cgc 未インデックスのファイルであれば、` +
     `次のメッセージに「[cgc-skip reason=<理由>]」を1行出力してから再実行する。` +
-    `\n(型シンボルで impact が空振りする場合は rg で参照を確認してから [cgc-check] を出すこと)`
-  );
+    `\n(型シンボルで impact が空振りする場合は rg で参照を確認してから [cgc-check] を出すこと)`;
+
+  // 小規模リポは deny を warn に降格 (#189-3): 儀式コスト > 便益になりやすい。
+  if (effectiveMode(cfg, proj) === 'warn') {
+    U.emitWarn(
+      message.replace(
+        '編集前に影響範囲を確認してください。',
+        '影響範囲が未確認です (warn モードのため編集は許可)。'
+      )
+    );
+    return;
+  }
+
+  U.emitDeny(message);
+}
+
+// mode 解決: 明示設定が最優先。deny のままでも graph.json が小さい
+// リポでは warn に自動降格する（smallRepoWarnBytes=0 で無効化可能）。
+function effectiveMode(cfg, proj) {
+  if (cfg.mode === 'warn') return 'warn';
+  if (cfg.smallRepoWarnBytes > 0) {
+    try {
+      const st = fs.statSync(U.graphFile(proj));
+      if (st.size < cfg.smallRepoWarnBytes) return 'warn';
+    } catch { /* graph 不在は isParticipating で弾かれている */ }
+  }
+  return 'deny';
 }
 
 // ゲート対象のファイルパスを解決する。Bash は rm / git rm のみ対象（README v1 スコープ）。
