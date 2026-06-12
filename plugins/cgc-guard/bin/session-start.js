@@ -5,6 +5,7 @@
 // （#7 教訓のバックストップ: 前セッションで index が死んでいてもここで必ず回収する）。
 
 const fs = require('fs');
+const zlib = require('zlib');
 const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const U = require('./lib/util');
@@ -44,19 +45,28 @@ function main() {
 
 // graph の鮮度: 'fresh' | 'stale' | 'corrupt'
 function checkFreshness(proj) {
-  // 破損検知（安価なヒューリスティック: 先頭/末尾バイト。途中 kill の truncate を捕捉）
+  // 破損検知。cgc #210 以降の graph.json は gzip（magic 0x1f 0x8b）、
+  // それ以前はプレーン JSON — 両形式を受け付ける。
   try {
     const f = U.graphFile(proj);
     const st = fs.statSync(f);
     if (st.size < 2) return 'corrupt';
     const fd = fs.openSync(f, 'r');
-    const head = Buffer.alloc(1);
+    const head = Buffer.alloc(2);
     const tailLen = Math.min(64, st.size);
     const tail = Buffer.alloc(tailLen);
-    fs.readSync(fd, head, 0, 1, 0);
+    fs.readSync(fd, head, 0, 2, 0);
     fs.readSync(fd, tail, 0, tailLen, st.size - tailLen);
     fs.closeSync(fd);
-    if (head.toString() !== '{' || !tail.toString('utf8').trimEnd().endsWith('}')) return 'corrupt';
+    if (head[0] === 0x1f && head[1] === 0x8b) {
+      // gzip スナップショット: 途中 kill の truncate は解凍で必ず例外に
+      // なる（~1MB 規模なら数 ms）。解凍結果が JSON 形であることも確認。
+      const body = zlib.gunzipSync(fs.readFileSync(f)).toString('utf8');
+      if (!body.startsWith('{') || !body.trimEnd().endsWith('}')) return 'corrupt';
+    } else if (head.toString('utf8', 0, 1) !== '{' || !tail.toString('utf8').trimEnd().endsWith('}')) {
+      // プレーン JSON（pre-#210 バイナリ）: 先頭/末尾バイトの安価な判定。
+      return 'corrupt';
+    }
   } catch {
     return 'corrupt';
   }
