@@ -51,6 +51,12 @@ function sessionStart(proj) {
   return lines.join('\n');
 }
 
+// 既出抑制のキー: 文書の出典（source）。同一文書の別チャンクも同一キーで畳む。
+// source 不明のヒットは抑制対象外（空キー → dedupAgainstSeen が常に残す）。
+function hitKey(h) {
+  return h && h.source ? String(h.source) : '';
+}
+
 function userPrompt(proj, input) {
   const query = (input && (input.prompt || input.user_prompt)) || '';
   if (!query.trim()) return '';
@@ -60,8 +66,28 @@ function userPrompt(proj, input) {
   const loc = U.searchBm25(query, { cwd: proj, topK: TOP_K, timeoutMs: 1500 });
   const glob = U.searchBm25(query, { cwd: proj, project: U.GLOBAL_PROJECT, topK: TOP_K, timeoutMs: 1500 });
 
-  const locHits = (loc.ok && loc.hits) ? loc.hits.slice(0, TOP_K) : [];
-  const globHits = (glob.ok && glob.hits) ? glob.hits.slice(0, Math.max(0, TOP_K - locHits.length)) : [];
+  let locHits = (loc.ok && loc.hits) ? loc.hits.slice(0, TOP_K) : [];
+  let globHits = (glob.ok && glob.hits) ? glob.hits.slice(0, Math.max(0, TOP_K - locHits.length)) : [];
+
+  // #14: 関連度フロア（arag#81）。score 未満は注入前に落とす（全件未満なら注入ブロック無し）。
+  const floor = U.recallFloor();
+  locHits = U.applyFloor(locHits, floor);
+  globHits = U.applyFloor(globHits, floor);
+
+  // #14: セッション内既出抑制。同一セッションで一度注入した文書は以後出さない（アラーム疲れ回避）。
+  // session_id が無いと跨セッション過剰抑制になるため、その場合は抑制しない（fail-open）。
+  const sid = (input && input.session_id) ? String(input.session_id) : '';
+  if (sid && U.sessionDedupEnabled()) {
+    const state = U.readJsonSafe(U.recallSeenFile(proj), null);
+    const seen = (state && state.session === sid && Array.isArray(state.keys)) ? state.keys : [];
+    const dl = U.dedupAgainstSeen(locHits, seen, hitKey);
+    const dg = U.dedupAgainstSeen(globHits, seen.concat(dl.keys), hitKey);
+    locHits = dl.kept;
+    globHits = dg.kept;
+    // 今回注入したキーを積み増し（肥大防止に直近 200 件へ丸める）。fail-open（書込失敗は無視）。
+    const merged = seen.concat(dl.keys, dg.keys).slice(-200);
+    U.writeJsonSafe(U.recallSeenFile(proj), { session: sid, keys: merged });
+  }
 
   if (locHits.length || globHits.length) {
     out.push('📚 関連する過去の記憶（arag・出典つきで参照のこと）:');
