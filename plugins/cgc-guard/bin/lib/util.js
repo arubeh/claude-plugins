@@ -118,6 +118,16 @@ const DEFAULT_GUARD_CONFIG = Object.freeze({
   // 0 で無効。cgc #210 以降の graph.json は gzip（実体比 ~1/5）のため、
   // プレーン JSON 時代の 128KiB から 1/4 に補正した値。
   smallRepoWarnBytes: 32768,
+  // 証跡の照合スコープ (v0.3.0): 'dir' は同一ディレクトリ内の別ファイルへの
+  // impact 証跡でも編集を許可する。複数ファイルへの機械的一括編集
+  // （例: 全パーサーに 1 行ずつ追加）で、ファイルごとに context+impact を
+  // 強要する儀式コストをなくす。'file' で従来の厳密照合。
+  evidenceScope: 'dir',
+  // risk 段階化 (v0.3.0): セッション内の impact でこの値未満の risk が
+  // 判明しているファイル/ディレクトリは、証跡 TTL 切れ後も deny せず warn に
+  // 降格する。'HIGH' = HIGH/CRITICAL のみ deny（既定）。'LOW' = 従来どおり
+  // 常に deny。リスクはコードの性質なので TTL より長持ちする、が根拠。
+  denyRiskFloor: 'HIGH',
   // 証跡 TTL (分)。
   fileTtlMinutes: 10,
   sessionTtlMinutes: 5,

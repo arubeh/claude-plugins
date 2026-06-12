@@ -202,6 +202,77 @@ assert.ok(!U.isTestPath('src/app.ts'));
   assert.strictEqual(ev.entries[0].tool, 'mcp__plugin_cgc-guard_cgc__impact');
 }
 
+// ---- v0.3.0: evidenceScope='dir' — 同一ディレクトリの証跡で一括編集を許可 -------
+
+{
+  const proj = tmpProject();
+  fs.mkdirSync(path.join(proj, '.cgc', 'tmp'), { recursive: true });
+  // 同じディレクトリの「別ファイル」への新鮮な impact 証跡。
+  fs.writeFileSync(
+    path.join(proj, '.cgc', 'tmp', 'evidence-dir1.json'),
+    JSON.stringify({
+      entries: [
+        { ts: Date.now(), tool: 'mcp__cgc__impact', symbol: 'walk', risk: 'LOW',
+          paths: [path.join(proj, 'src', 'other_parser.rs')] },
+      ],
+    })
+  );
+  const out = runGate({
+    tool_name: 'Edit',
+    tool_input: { file_path: path.join(proj, 'src', 'edit_me.rs') },
+    cwd: proj,
+    session_id: 'dir1',
+  });
+  assert.strictEqual(
+    decision(out), undefined,
+    'same-directory evidence must allow the edit (batch-edit waiver)'
+  );
+}
+
+// ---- v0.3.0: risk 段階化 — 既知 LOW は TTL 切れ後も warn、CRITICAL は deny -------
+
+{
+  const stale = Date.now() - 20 * 60 * 1000; // fileTtl(10分) 超過・KEEP(30分) 内
+  const mkEvidence = (sid, risk, proj) => {
+    fs.mkdirSync(path.join(proj, '.cgc', 'tmp'), { recursive: true });
+    fs.writeFileSync(
+      path.join(proj, '.cgc', 'tmp', `evidence-${sid}.json`),
+      JSON.stringify({
+        entries: [
+          { ts: stale, tool: 'mcp__cgc__impact', symbol: 's', risk,
+            paths: [path.join(proj, 'src', 'low_risk.rs')] },
+        ],
+      })
+    );
+  };
+
+  const projLow = tmpProject();
+  mkEvidence('risk1', 'LOW', projLow);
+  const outLow = runGate({
+    tool_name: 'Edit',
+    tool_input: { file_path: path.join(projLow, 'src', 'low_risk.rs') },
+    cwd: projLow,
+    session_id: 'risk1',
+  });
+  assert.notStrictEqual(
+    decision(outLow), 'deny',
+    'known-LOW file must demote to warn after TTL expiry'
+  );
+
+  const projHigh = tmpProject();
+  mkEvidence('risk2', 'CRITICAL', projHigh);
+  const outHigh = runGate({
+    tool_name: 'Edit',
+    tool_input: { file_path: path.join(projHigh, 'src', 'low_risk.rs') },
+    cwd: projHigh,
+    session_id: 'risk2',
+  });
+  assert.strictEqual(
+    decision(outHigh), 'deny',
+    'known-CRITICAL file must stay denied'
+  );
+}
+
 // ---- session-start: gzip graph.json (cgc #210+) を破損扱いしない -----------------
 
 {

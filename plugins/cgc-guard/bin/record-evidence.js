@@ -34,10 +34,16 @@ function main() {
   const entries = (Array.isArray(ev.entries) ? ev.entries : []).filter(
     (e) => now - e.ts < KEEP_MS
   );
+  // impact レスポンスの "Risk: LOW|MEDIUM|HIGH|CRITICAL" を抽出 (v0.3.0)。
+  // pre-edit-gate の risk 段階化（LOW/MEDIUM 既知ファイルは deny→warn）に使う。
+  const riskMatch = /Risk:\s*(LOW|MEDIUM|HIGH|CRITICAL)/.exec(
+    JSON.stringify(input.tool_response || '')
+  );
   entries.push({
     ts: now,
     tool: input.tool_name,
     symbol: ti.symbol || ti.name || ti.function_name || '',
+    risk: riskMatch ? riskMatch[1] : '',
     paths,
   });
   U.writeJsonSafe(file, { entries: entries.slice(-MAX_ENTRIES) });
