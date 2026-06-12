@@ -202,4 +202,40 @@ assert.ok(!U.isTestPath('src/app.ts'));
   assert.strictEqual(ev.entries[0].tool, 'mcp__plugin_cgc-guard_cgc__impact');
 }
 
+// ---- session-start: gzip graph.json (cgc #210+) を破損扱いしない -----------------
+
+{
+  const zlib = require('zlib');
+  const SS = path.join(ROOT, 'bin', 'session-start.js');
+  const runSessionStart = (proj) => {
+    const r = spawnSync(process.execPath, [SS], {
+      input: JSON.stringify({ cwd: proj, session_id: 'ss1' }),
+      encoding: 'utf8',
+      env: { ...process.env, CGC_BIN: process.execPath },
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    return r.stdout;
+  };
+  const json = '{"version":1,"nodes":[],"edges":[]}';
+
+  // gzip スナップショット → 破損ノート無し
+  const proj = tmpProject();
+  fs.writeFileSync(path.join(proj, '.cgc', 'graph.json'), zlib.gzipSync(Buffer.from(json)));
+  assert.ok(
+    !runSessionStart(proj).includes('破損'),
+    'gzip graph must not be treated as corrupt'
+  );
+
+  // 途中 kill で truncate された gzip → corrupt（解凍が例外になる）
+  const proj2 = tmpProject();
+  const gz = zlib.gzipSync(Buffer.from(json));
+  fs.writeFileSync(path.join(proj2, '.cgc', 'graph.json'), gz.subarray(0, gz.length - 6));
+  assert.ok(runSessionStart(proj2).includes('破損'), 'truncated gzip must be corrupt');
+
+  // プレーン JSON（pre-#210 バイナリ）も従来どおり受理
+  const proj3 = tmpProject();
+  fs.writeFileSync(path.join(proj3, '.cgc', 'graph.json'), json);
+  assert.ok(!runSessionStart(proj3).includes('破損'), 'plain JSON graph must stay valid');
+}
+
 console.log('smoke: all assertions passed');

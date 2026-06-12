@@ -115,8 +115,9 @@ const DEFAULT_GUARD_CONFIG = Object.freeze({
   // tests/ 配下・*_test.* / *.test.* / *.spec.* はゲート対象外 (#189-1)。
   excludeTests: true,
   // graph.json がこのバイト数未満の小規模リポは deny を warn に降格 (#189-3)。
-  // 0 で無効。
-  smallRepoWarnBytes: 131072,
+  // 0 で無効。cgc #210 以降の graph.json は gzip（実体比 ~1/5）のため、
+  // プレーン JSON 時代の 128KiB から 1/4 に補正した値。
+  smallRepoWarnBytes: 32768,
   // 証跡 TTL (分)。
   fileTtlMinutes: 10,
   sessionTtlMinutes: 5,
