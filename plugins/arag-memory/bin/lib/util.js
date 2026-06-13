@@ -248,6 +248,23 @@ function sessionDedupEnabled() {
   const v = (process.env.ARAG_RECALL_SESSION_DEDUP || '').trim().toLowerCase();
   return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
 }
+
+// ---- 深い recall ナッジ（#22: 安価シードが 0 件のとき MCP 深掘りを促す）----------
+// 安価フック層（bm25/warm hybrid）が 0 件のときだけ、深い意味検索（MCP arag_search/ask）を
+// 促す 1 行をモデルに見せる。任意判断頼みだった深い recall を「決定論層がトリガを出す」形に
+// 変える。過剰ナッジを避けるためセッション 1 回だけ（rate-limit）・既定 ON・env で opt-out。
+
+// 既定 ON。`ARAG_RECALL_DEEP_NUDGE=0/false/off/no` で無効。
+function deepNudgeEnabled() {
+  const v = (process.env.ARAG_RECALL_DEEP_NUDGE || '').trim().toLowerCase();
+  return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
+}
+
+// ナッジを出すか（純粋関数・テスト容易）。注入実体が 0 件 かつ 有効 かつ 当該セッション未ナッジ
+// のときだけ true。シードに 1 件でもヒットがあれば出さない（過剰ナッジ防止の主条件）。
+function shouldDeepNudge({ injected, enabled, alreadyNudged }) {
+  return !!enabled && injected === 0 && !alreadyNudged;
+}
 function recallSeenFile(proj) {
   return path.join(localDataDir(proj), '_recall-seen.json'); // セッション単位の既出文書集合
 }
@@ -356,6 +373,7 @@ module.exports = {
   scrubSecrets,
   recallFloor, parseFloor, applyFloor,
   sessionDedupEnabled, recallSeenFile, dedupAgainstSeen,
+  deepNudgeEnabled, shouldDeepNudge,
   globalReserved, dedupCrossScope, mergeReserved,
   readJsonSafe, writeJsonSafe, readHookInput, emitContext,
   color,
