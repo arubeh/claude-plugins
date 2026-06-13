@@ -123,3 +123,21 @@ test('applyFloor: floor=null は素通し / 数値はフィルタ（既存挙動
   assert.strictEqual(U.applyFloor(hits, null).length, 2);
   assert.deepStrictEqual(U.applyFloor(hits, 0.5).map((h) => h.source), ['a']);
 });
+
+test('shouldDeepNudge: 0件 かつ 有効 かつ 未ナッジ のときだけ true (#22)', () => {
+  assert.strictEqual(U.shouldDeepNudge({ injected: 0, enabled: true, alreadyNudged: false }), true);
+  assert.strictEqual(U.shouldDeepNudge({ injected: 2, enabled: true, alreadyNudged: false }), false, 'ヒットあれば出さない');
+  assert.strictEqual(U.shouldDeepNudge({ injected: 0, enabled: false, alreadyNudged: false }), false, '無効なら出さない');
+  assert.strictEqual(U.shouldDeepNudge({ injected: 0, enabled: true, alreadyNudged: true }), false, 'セッション既ナッジは出さない(rate-limit)');
+});
+
+test('deepNudgeEnabled: 既定 ON・0/false/off/no で OFF (#22)', () => {
+  const save = process.env.ARAG_RECALL_DEEP_NUDGE;
+  delete process.env.ARAG_RECALL_DEEP_NUDGE;
+  assert.strictEqual(U.deepNudgeEnabled(), true, '未設定は ON');
+  process.env.ARAG_RECALL_DEEP_NUDGE = '0';
+  assert.strictEqual(U.deepNudgeEnabled(), false);
+  process.env.ARAG_RECALL_DEEP_NUDGE = 'off';
+  assert.strictEqual(U.deepNudgeEnabled(), false);
+  if (save === undefined) delete process.env.ARAG_RECALL_DEEP_NUDGE; else process.env.ARAG_RECALL_DEEP_NUDGE = save;
+});

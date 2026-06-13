@@ -79,14 +79,20 @@ function userPrompt(proj, input) {
   // #P1: scope 横断 dedup（同一文書が local/global 両方にあれば local を優先して 1 度だけ）。
   globHits = U.dedupCrossScope(locHits, globHits, hitKey);
 
-  // #14: セッション内既出抑制（候補プールに対して適用してから最終サイズ調整）。
-  // session_id が無いと跨セッション過剰抑制になるため、その場合は抑制しない（fail-open）。
+  // #14/#22: セッション状態（既出キー + ナッジ履歴）を一度だけ読む。session_id が無いと
+  // 跨セッション過剰抑制になるため dedup も rate-limit もスキップする（fail-open）。
   const sid = (input && input.session_id) ? String(input.session_id) : '';
-  let seen = [];
   const dedup = sid && U.sessionDedupEnabled();
-  if (dedup) {
+  let seen = [];
+  let alreadyNudged = false;
+  if (sid) {
     const state = U.readJsonSafe(U.recallSeenFile(proj), null);
-    seen = (state && state.session === sid && Array.isArray(state.keys)) ? state.keys : [];
+    if (state && state.session === sid) {
+      if (Array.isArray(state.keys)) seen = state.keys;
+      alreadyNudged = !!state.nudged;
+    }
+  }
+  if (dedup) {
     locHits = U.dedupAgainstSeen(locHits, seen, hitKey).kept;
     globHits = U.dedupAgainstSeen(globHits, seen, hitKey).kept;
   }
@@ -97,11 +103,15 @@ function userPrompt(proj, input) {
   locHits = merged.loc;
   globHits = merged.glob;
 
-  // 既出キーの積み増しは「実際に注入した最終列」で行う（マージで落ちた候補を seen 化しない＝過剰抑制回避）。
-  if (dedup) {
+  const injected = locHits.length + globHits.length;
+  // #22: 安価シードが 0 件なら深い MCP recall を促す（セッション 1 回・opt-out・要 session_id）。
+  const doNudge = !!sid && U.shouldDeepNudge({ injected, enabled: U.deepNudgeEnabled(), alreadyNudged });
+
+  // セッション状態を書き戻す（実際に注入した最終列のキーを積み増し + ナッジ履歴）。
+  if (sid) {
     const injectedKeys = [...locHits, ...globHits].map(hitKey).filter(Boolean);
-    const mergedSeen = seen.concat(injectedKeys).slice(-200);
-    U.writeJsonSafe(U.recallSeenFile(proj), { session: sid, keys: mergedSeen });
+    const keys = (dedup ? seen.concat(injectedKeys) : seen).slice(-200);
+    U.writeJsonSafe(U.recallSeenFile(proj), { session: sid, keys, nudged: alreadyNudged || doNudge });
   }
 
   if (locHits.length || globHits.length) {
@@ -113,6 +123,14 @@ function userPrompt(proj, input) {
     out.push('📚 関連する過去の記憶（arag）:');
     if (loc.text) out.push('[local]\n' + loc.text);
     if (glob.text) out.push('[global]\n' + glob.text);
+  }
+  // #22: 深い recall ナッジ（自動検索 0 件のときだけ・セッション 1 回）。任意判断だった
+  // 深い意味検索を「決定論層が促す」形にし、出典つき回答の入口へ誘導する。
+  if (doNudge) {
+    out.push(
+      '💡 過去記憶の自動検索は0件でした。関連しそうなら深掘りを: ' +
+      'mcp__arag__search / mcp__arag__ask（このPJ）と mcp__arag_global__search（全社共通）。出典付きで回答してください。'
+    );
   }
   return out.join('\n');
 }
