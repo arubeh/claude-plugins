@@ -137,6 +137,8 @@ function toAddTextPayload(c, originProject) {
   };
   if (it.scope === 'org') metadata.origin_project = originProject;
   if (it.slug) metadata.slug = it.slug;
+  // #23: 救済由来は弱い知識の印を残す（recall/consolidate が識別して要精査扱いにする）。
+  if (it.salvaged) metadata.salvaged = true;
   const title = U.scrubSecrets(it.title || '(untitled)');
   const body = U.scrubSecrets(it.body || '');
   return {
@@ -319,6 +321,95 @@ function syncClaudeFileMemory(proj) {
   return upsertPayloads(payloads, { cwd: proj, project: U.GLOBAL_PROJECT });
 }
 
+// ---- #23: transcript 救済スキャン（capture 取りこぼしの安全網・opt-in・local 限定）----
+// pending が空のときだけ、会話 transcript を高精度シグナルでスキャンし、モデルが下書きし
+// 損ねた決定/教訓/原因を弱い知識（confidence=uncertain・scope=project・salvaged）として救済。
+// 質はモデル下書きに劣るため絶対に global 昇格させない（scope=project 固定）。
+
+// 既定 OFF。`ARAG_CAPTURE_SALVAGE=1/true/on/yes` で有効化。
+function salvageEnabled() {
+  return /^(1|true|on|yes)$/i.test(String(process.env.ARAG_CAPTURE_SALVAGE || '').trim());
+}
+
+// 高精度シグナル: 「名詞句/目的語(5字以上) + 決定・教訓・原因の述語」を要求し、雑談の
+// 動詞単体ヒットを排除する（検証パネルの修正版）。日本語 + 英語。
+const SALVAGE_SIGNALS = [
+  { re: /[^。\n]{5,}?(?:することにした|に決めた|を採用した|を廃止した|を禁止する|はNGとなった)/u, type: 'decision' },
+  { re: /(?:根本原因は|失敗の原因は|原因は)[^。\n]{5,}/u, type: 'postmortem' },
+  { re: /(?:教訓[：:]|学んだこと[：:]|反省[：:])[^。\n]{5,}/u, type: 'lesson' },
+  { re: /方針[：:][^。\n]{5,}?(?:とする|にする|を守る)/u, type: 'decision' },
+  { re: /(?:we|I)\s+(?:decided|will use|will avoid|must not|should not)\s+[A-Za-z][^.\n]{5,}/i, type: 'decision' },
+  { re: /(?:root cause|lesson learned|key insight)[：:]\s*[^.\n]{10,}/i, type: 'lesson' },
+  { re: /(?:pitfall|gotcha|known issue)[：:]\s*[^.\n]{10,}/i, type: 'lesson' },
+];
+
+// transcript JSONL 1 行から user/assistant の発話テキストを取り出す（純粋）。
+// user: content が文字列なら採用（tool_result 配列は無視）。assistant: content 配列の
+// text ブロックを連結（thinking/tool_use は除外）。それ以外の行は ''。
+function lineToText(line) {
+  let o;
+  try { o = JSON.parse(line); } catch { return ''; }
+  if (o.type !== 'user' && o.type !== 'assistant') return '';
+  const c = o.message && o.message.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    return c.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
+  }
+  return '';
+}
+
+// REDACTED が本文を占有していないか（email 等の過剰 redaction で本文が壊れた救済を捨てる）。
+function isMostlyRedacted(body) {
+  const stripped = String(body || '').replace(/«REDACTED[^»]*»/g, '').trim();
+  return stripped.length < 10;
+}
+
+// transcript 全文から救済候補を抽出する純粋関数（#23・テスト容易）。
+// 末尾最大 400 行の user/assistant text をシグナル走査し、ヒット文を弱い知識へ整形。
+// 同一正規化タイトルで dedup、max 件で打ち切り。秘密はスクラブ。
+function extractSalvageCandidates(transcriptText, { max = 3, date = '' } = {}) {
+  const lines = String(transcriptText || '').split(/\r?\n/).filter((l) => l.trim());
+  const tail = lines.slice(-400);
+  const out = [];
+  const seenTitles = new Set();
+  for (const line of tail) {
+    const text = lineToText(line);
+    if (!text) continue;
+    for (const sig of SALVAGE_SIGNALS) {
+      const m = text.match(sig.re);
+      if (!m) continue;
+      const sentence = m[0].replace(/\s+/g, ' ').trim().slice(0, 280);
+      const body = U.scrubSecrets(sentence);
+      if (isMostlyRedacted(body) || body.length < 10) continue;
+      const title = body.slice(0, 60);
+      const key = title.toLowerCase().replace(/\s+/g, ' ').trim();
+      if (seenTitles.has(key)) continue;
+      seenTitles.add(key);
+      out.push({
+        type: sig.type,
+        title,
+        body,
+        scope: 'project', // 絶対に org にしない（global 昇格ゲートに乗せない）
+        confidence: 'uncertain',
+        status: 'provisional',
+        epistemic: 'inferred',
+        date,
+        salvaged: true,
+      });
+      if (out.length >= max) return out;
+    }
+  }
+  return out;
+}
+
+// transcript_path を読んで救済候補を返す（I/O 版）。読めなければ []（fail-open）。
+function extractSalvageCandidatesFromFile(transcriptPath, { max = 3 } = {}) {
+  let raw;
+  try { raw = fs.readFileSync(transcriptPath, 'utf8'); } catch { return []; }
+  const date = new Date().toISOString().slice(0, 10);
+  return extractSalvageCandidates(raw, { max, date });
+}
+
 function main() {
   const input = U.readHookInput();
   const proj = U.projectDir(input);
@@ -336,7 +427,18 @@ function main() {
   }
 
   const file = U.draftFile(proj);
-  const items = parseDrafts(file);
+  let items = parseDrafts(file);
+  // #23: pending が空のときだけ transcript 救済（opt-in）。下書きがあれば一切起動しない。
+  let salvaged = false;
+  if (!items.length && salvageEnabled() && input.transcript_path) {
+    try {
+      const cand = extractSalvageCandidatesFromFile(input.transcript_path, { max: 3 });
+      if (cand.length) {
+        items = cand;
+        salvaged = true;
+      }
+    } catch { /* fail-open: 救済失敗は capture 本体を止めない */ }
+  }
   if (!items.length) return;
 
   const originProject = path.basename(proj);
@@ -378,6 +480,9 @@ function main() {
   // 色付きサマリ（即時表示はホスト依存のため best-effort・SessionStart 再掲が確実な経路）
   const { color } = U;
   const parts = [];
+  if (salvaged) {
+    parts.push(color.yellow(`🛟 救済モード: pending 空のため transcript から ${items.length} 件を弱い知識(uncertain/local)として救済（consolidate で要精査）`));
+  }
   parts.push(color.cyan(`🗃  arag capture: local ${locRes.count}/${captured.length} 件保存`));
   if (promoteCaptured.length) {
     parts.push(color.green(`⬆️  global 昇格 ${globRes.count}/${promoteCaptured.length} 件 (scope=org・confidence=known)`));
@@ -394,7 +499,14 @@ function main() {
 }
 
 // 純粋関数はテスト用に公開（フック実行は直接起動時のみ）。
-module.exports = { claudeMemoryDir, parseMemoryMd, buildMemoryPayloads };
+module.exports = {
+  claudeMemoryDir,
+  parseMemoryMd,
+  buildMemoryPayloads,
+  extractSalvageCandidates,
+  salvageEnabled,
+  isMostlyRedacted,
+};
 
 if (require.main === module) {
   try { main(); } catch (e) { try { process.stderr.write('arag session-end error: ' + e + '\n'); } catch {} }
