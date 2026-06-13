@@ -62,31 +62,46 @@ function userPrompt(proj, input) {
   if (!query.trim()) return '';
   const out = [];
 
-  // local 優先 → global 補完（§1.6⑤ 両引き）。各々 fail-open。
-  const loc = U.searchBm25(query, { cwd: proj, topK: TOP_K, timeoutMs: 1500 });
-  const glob = U.searchBm25(query, { cwd: proj, project: U.GLOBAL_PROJECT, topK: TOP_K, timeoutMs: 1500 });
+  // #P2: warm デーモン在なら hybrid（意味検索・言い換えに強い）、不在なら bm25（§1.7 死守）。
+  const mode = U.recallMode();
+  // local 優先 → global 補完（§1.6⑤ 両引き）。各々 fail-open。timeout は cold hybrid 退避に余裕を持たせる。
+  const loc = U.searchRecall(query, { cwd: proj, topK: TOP_K, timeoutMs: 2500, mode });
+  const glob = U.searchRecall(query, { cwd: proj, project: U.GLOBAL_PROJECT, topK: TOP_K, timeoutMs: 2500, mode });
 
-  let locHits = (loc.ok && loc.hits) ? loc.hits.slice(0, TOP_K) : [];
-  let globHits = (glob.ok && glob.hits) ? glob.hits.slice(0, Math.max(0, TOP_K - locHits.length)) : [];
+  let locHits = (loc.ok && loc.hits) ? loc.hits : [];
+  let globHits = (glob.ok && glob.hits) ? glob.hits : [];
 
-  // #14: 関連度フロア（arag#81）。score 未満は注入前に落とす（全件未満なら注入ブロック無し）。
+  // #14: 関連度フロア（arag#81）。score 未満は注入前に落とす（既定 OFF=全件素通し）。
   const floor = U.recallFloor();
   locHits = U.applyFloor(locHits, floor);
   globHits = U.applyFloor(globHits, floor);
 
-  // #14: セッション内既出抑制。同一セッションで一度注入した文書は以後出さない（アラーム疲れ回避）。
+  // #P1: scope 横断 dedup（同一文書が local/global 両方にあれば local を優先して 1 度だけ）。
+  globHits = U.dedupCrossScope(locHits, globHits, hitKey);
+
+  // #14: セッション内既出抑制（候補プールに対して適用してから最終サイズ調整）。
   // session_id が無いと跨セッション過剰抑制になるため、その場合は抑制しない（fail-open）。
   const sid = (input && input.session_id) ? String(input.session_id) : '';
-  if (sid && U.sessionDedupEnabled()) {
+  let seen = [];
+  const dedup = sid && U.sessionDedupEnabled();
+  if (dedup) {
     const state = U.readJsonSafe(U.recallSeenFile(proj), null);
-    const seen = (state && state.session === sid && Array.isArray(state.keys)) ? state.keys : [];
-    const dl = U.dedupAgainstSeen(locHits, seen, hitKey);
-    const dg = U.dedupAgainstSeen(globHits, seen.concat(dl.keys), hitKey);
-    locHits = dl.kept;
-    globHits = dg.kept;
-    // 今回注入したキーを積み増し（肥大防止に直近 200 件へ丸める）。fail-open（書込失敗は無視）。
-    const merged = seen.concat(dl.keys, dg.keys).slice(-200);
-    U.writeJsonSafe(U.recallSeenFile(proj), { session: sid, keys: merged });
+    seen = (state && state.session === sid && Array.isArray(state.keys)) ? state.keys : [];
+    locHits = U.dedupAgainstSeen(locHits, seen, hitKey).kept;
+    globHits = U.dedupAgainstSeen(globHits, seen, hitKey).kept;
+  }
+
+  // #P1: global 予約枠つきマージ。local が TOP_K を独占して global（別 PJ 由来の汎用知識）が
+  // 枯れるのを防ぐ。reserved=0 で従来の local 優先充填へ opt-out。
+  const merged = U.mergeReserved(locHits, globHits, TOP_K, U.globalReserved());
+  locHits = merged.loc;
+  globHits = merged.glob;
+
+  // 既出キーの積み増しは「実際に注入した最終列」で行う（マージで落ちた候補を seen 化しない＝過剰抑制回避）。
+  if (dedup) {
+    const injectedKeys = [...locHits, ...globHits].map(hitKey).filter(Boolean);
+    const mergedSeen = seen.concat(injectedKeys).slice(-200);
+    U.writeJsonSafe(U.recallSeenFile(proj), { session: sid, keys: mergedSeen });
   }
 
   if (locHits.length || globHits.length) {
