@@ -90,7 +90,8 @@ function resolveAragBin() {
 }
 
 // arag CLI をワンショット実行。timeoutMs 超過や失敗は {ok:false} を返す（fail-open は呼び出し側）。
-function runArag(args, { cwd, timeoutMs = 1500, input } = {}) {
+// env を渡すと process.env にマージして子へ伝える（#P2: ARAG_DAEMON=1 注入で stale 自己治癒）。
+function runArag(args, { cwd, timeoutMs = 1500, input, env } = {}) {
   try {
     const r = spawnSync(resolveAragBin(), args, {
       cwd,
@@ -98,6 +99,7 @@ function runArag(args, { cwd, timeoutMs = 1500, input } = {}) {
       timeout: timeoutMs,
       encoding: 'utf8',
       windowsHide: true,
+      env: env ? { ...process.env, ...env } : process.env,
     });
     if (r.error || r.status !== 0) {
       return { ok: false, stdout: r.stdout || '', stderr: r.stderr || String(r.error || `exit ${r.status}`) };
@@ -117,11 +119,16 @@ function stripAnsi(s) {
 // bm25 高速パス検索（モデル非ロード・~100ms／§1.7）。
 // arag #56 の `-f json` を使い構造化結果を得る。未対応(旧 arag)なら ANSI 除去テキストへ
 // フォールバック（前方・後方互換）。`--project` はグローバル指定のためサブコマンド前に置く。
-function searchBm25(query, { cwd, project, topK = 5, timeoutMs = 1500 } = {}) {
+// recall シード検索（mode 切替可能・#P2）。warm デーモン在なら hybrid（意味検索 ~168ms）、
+// 不在なら bm25（~100ms）。`mode==='hybrid'` のときだけ ARAG_DAEMON=1 を注入し、stale な
+// daemon.json（プロセス死亡後の残骸）に当たっても arag 側が cold へ自己フォールバック→
+// daemon.json 削除し、次回から bm25 へ自然回復させる（毎回の重い cold ロードを防ぐ）。
+function searchRecall(query, { cwd, project, topK = 5, timeoutMs = 2500, mode = 'bm25' } = {}) {
   const args = [];
   if (project) args.push('--project', project);
-  args.push('search', '-m', 'bm25', '-k', String(topK), '-f', 'json', query);
-  const r = runArag(args, { cwd, timeoutMs });
+  args.push('search', '-m', mode, '-k', String(topK), '-f', 'json', query);
+  const env = mode === 'hybrid' ? { ARAG_DAEMON: '1' } : undefined;
+  const r = runArag(args, { cwd, timeoutMs, env });
   if (!r.ok) return { ok: false, hits: [], stderr: r.stderr };
   try {
     const parsed = JSON.parse(r.stdout);
@@ -131,6 +138,35 @@ function searchBm25(query, { cwd, project, topK = 5, timeoutMs = 1500 } = {}) {
     // 旧 arag（search に -f json 無し）→ ANSI 除去テキストをそのまま返す（fail-open）
     return { ok: true, hits: [], text: stripAnsi(r.stdout).trim() };
   }
+}
+
+// 後方互換: bm25 固定の旧シグネチャ（session-end の重複判定など既存呼び出し・テスト用に温存）。
+function searchBm25(query, opts = {}) {
+  return searchRecall(query, { ...opts, mode: 'bm25' });
+}
+
+// warm 常駐デーモン(#71)が居そうかを stat+read 1 回(~0.1ms)で判定する（#P2）。
+// daemon.json の存在 + endpoint/pipe/socket フィールドの有無で見る。ARAG_DAEMON=0/false/off/no
+// は検出無効（false 固定）。例外は false（fail-open）。完全な liveness 検証はせず、stale な
+// daemon.json は searchRecall の ARAG_DAEMON=1 注入による arag 側自己治癒に委ねる。
+function daemonPresent() {
+  if (/^(0|false|off|no)$/i.test(String(process.env.ARAG_DAEMON || ''))) return false;
+  try {
+    const info = path.join(os.homedir(), '.acode', 'arag', 'daemon', 'daemon.json');
+    if (!fs.existsSync(info)) return false;
+    const j = JSON.parse(fs.readFileSync(info, 'utf8'));
+    return !!(j && (j.endpoint || j.pipe || j.socket));
+  } catch {
+    return false;
+  }
+}
+
+// recall シードの検索モード（#P2）。`ARAG_RECALL_MODE=bm25|hybrid|auto`（既定 auto）。
+// auto は warm デーモンが居れば hybrid（意味検索・言い換えに強い）、居なければ bm25（§1.7 死守）。
+function recallMode() {
+  const v = String(process.env.ARAG_RECALL_MODE || 'auto').trim().toLowerCase();
+  if (v === 'bm25' || v === 'hybrid') return v;
+  return daemonPresent() ? 'hybrid' : 'bm25';
 }
 
 // ---- アトミック mkdir ロック（flock 相当・Windows 対応／§0）------------------
@@ -232,6 +268,45 @@ function dedupAgainstSeen(hits, seen, keyOf) {
   return { kept, keys };
 }
 
+// ---- global 予約枠つきマージ（#P1: local が TOP_K を独占して global が枯れるのを防ぐ）----
+// 現状の「local で TOP_K を埋め、残り枠だけ global」は、ローカルが充実した PJ で global
+// （別 PJ 由来の汎用知識）が構造的に出ない。ユーザー要望「global と local の両方から想起」を
+// 満たすため、global に最低枠を確保するスコープ横断マージへ置換する。
+
+// global に確保する最低枠（既定 2・`RAG_` fallback）。0 で従来の local 優先充填へ opt-out。
+function globalReserved() {
+  const raw = process.env.ARAG_RECALL_GLOBAL_RESERVED ?? process.env.RAG_RECALL_GLOBAL_RESERVED ?? '2';
+  const n = parseInt(raw, 10);
+  if (Number.isFinite(n) && n > 0) return n;
+  return String(raw).trim() === '0' ? 0 : 2; // NaN/負は既定 2、明示 0 のみ opt-out
+}
+
+// scope 横断 dedup（純粋関数）: global から「local に既出の source キー」を除く（local 優先）。
+// 同一文書が local/global 両 index に存在しても 1 度しか出さない。keyOf(falsy) は常に残す。
+function dedupCrossScope(locHits, globHits, keyOf) {
+  const locKeys = new Set((locHits || []).map(keyOf).filter(Boolean));
+  return (globHits || []).filter((h) => {
+    const k = keyOf(h);
+    return !k || !locKeys.has(k);
+  });
+}
+
+// 予約枠つきマージ（純粋関数・#P1）。TOP_K のうち最低 min(reserved, 利用可能 global 件数) を
+// global に確保し、残りを local 優先で充填、なお余れば global で埋める。両端（local 空 /
+// global 空）は従来同様 TOP_K まで片側で埋まる。positiveOnly（既定 ON）は score<=0 の global を
+// 予約候補から除外（無関係ノイズの予約混入防止）。reserved=0 で従来の local 優先充填へバイト等価。
+// 返り値 { loc, glob }（recall.js の「local→global」表示順を温存）。
+function mergeReserved(locHits, globHits, topK, reserved, { positiveOnly = true } = {}) {
+  const loc = Array.isArray(locHits) ? locHits : [];
+  const globRaw = Array.isArray(globHits) ? globHits : [];
+  const glob = positiveOnly ? globRaw.filter((h) => h.score == null || h.score > 0) : globRaw;
+  const r = Math.max(0, reserved | 0);
+  const g = Math.min(r, glob.length, topK);              // 確保する global 枠
+  const locTake = Math.min(loc.length, topK - g);        // local は残りを充填
+  const globTake = Math.min(glob.length, topK - locTake); // global は予約枠 + 余り
+  return { loc: loc.slice(0, locTake), glob: glob.slice(0, globTake) };
+}
+
 // ---- JSON I/O ヘルパ -------------------------------------------------------
 
 function readJsonSafe(file, fallback) {
@@ -276,11 +351,12 @@ module.exports = {
   GLOBAL_PROJECT,
   projectDir, localDataDir, draftFile, recentFile, pendingNoticeFile,
   isParticipating, hasLocalIndex, hasGlobalIndex,
-  resolveAragBin, runArag, searchBm25,
+  resolveAragBin, runArag, searchBm25, searchRecall, daemonPresent, recallMode,
   acquireLock, sleepSync,
   scrubSecrets,
   recallFloor, parseFloor, applyFloor,
   sessionDedupEnabled, recallSeenFile, dedupAgainstSeen,
+  globalReserved, dedupCrossScope, mergeReserved,
   readJsonSafe, writeJsonSafe, readHookInput, emitContext,
   color,
 };
