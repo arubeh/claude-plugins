@@ -141,3 +141,89 @@ test('deepNudgeEnabled: 既定 ON・0/false/off/no で OFF (#22)', () => {
   assert.strictEqual(U.deepNudgeEnabled(), false);
   if (save === undefined) delete process.env.ARAG_RECALL_DEEP_NUDGE; else process.env.ARAG_RECALL_DEEP_NUDGE = save;
 });
+
+// ---- 関連度ゲート（語彙ゲート + 相対フロア）-----------------------------------
+
+test('recallGateEnabled: 既定 ON・0/false/off/no で OFF', () => {
+  const save = process.env.ARAG_RECALL_GATE;
+  delete process.env.ARAG_RECALL_GATE;
+  assert.strictEqual(U.recallGateEnabled(), true, '未設定は ON');
+  for (const v of ['0', 'false', 'off', 'no']) {
+    process.env.ARAG_RECALL_GATE = v;
+    assert.strictEqual(U.recallGateEnabled(), false, `${v} は OFF`);
+  }
+  process.env.ARAG_RECALL_GATE = '1';
+  assert.strictEqual(U.recallGateEnabled(), true, '1 は ON');
+  if (save === undefined) delete process.env.ARAG_RECALL_GATE; else process.env.ARAG_RECALL_GATE = save;
+});
+
+test('extractQueryTerms: ASCII は長さ≥3・小文字化・重複なし', () => {
+  const t = U.extractQueryTerms('CI-fix Commit ci a loop');
+  assert.deepStrictEqual(t.ascii.sort(), ['commit', 'fix', 'loop'], 'ci(2文字)/a は除外・重複なし');
+});
+
+test('extractQueryTerms: CJK は 2-gram に分解', () => {
+  const t = U.extractQueryTerms('暗号化');
+  assert.deepStrictEqual(t.cjk, ['暗号', '号化'], '連続ランの 2-gram');
+});
+
+test('extractQueryTerms: 記号のみ/短すぎは有意語ゼロ', () => {
+  const t = U.extractQueryTerms('?? - / ci');
+  assert.strictEqual(t.ascii.length, 0);
+  assert.strictEqual(t.cjk.length, 0);
+});
+
+test('applyRelevanceGate: 英語クエリ↔日本語ヒットは重なりゼロで落とす（主症状）', () => {
+  const hits = [
+    { source: 'manual.md', section: 'バックアップ手順', preview: 'clasyslog のサイズが大きくなる場合' },
+    { source: 'a.md', section: 'CI', preview: 'run ci-fix until green commit push' },
+  ];
+  const kept = U.applyRelevanceGate(hits, 'ci-fix commit push loop');
+  assert.deepStrictEqual(kept.map((h) => h.source), ['a.md'], '日本語マニュアルは落ち英語ヒットは残る');
+});
+
+test('hitMatchesQuery: ASCII は語トークン一致（suffix への部分一致は不可・terminal_fix は可）', () => {
+  const terms = U.extractQueryTerms('ci-fix');
+  assert.strictEqual(U.hitMatchesQuery({ preview: 'this is a suffix and prefix' }, terms), false, 'suffix の fix には誤一致しない');
+  assert.strictEqual(U.hitMatchesQuery({ preview: 'FORCING_TERMINAL_FIX flag' }, terms), true, '区切りで分かれた fix トークンは一致（語の真の重なり）');
+});
+
+test('applyRelevanceGate: 同言語の関連ヒットは残す（過剰ドロップなし）', () => {
+  const hits = [{ source: 'm.md', section: '暗号化監視', preview: '暗号化監視の設定を行う' }];
+  const kept = U.applyRelevanceGate(hits, '暗号化監視 設定');
+  assert.strictEqual(kept.length, 1, 'CJK 2-gram が重なるので残る');
+});
+
+test('applyRelevanceGate: 有意語ゼロのクエリは素通し（fail-open）', () => {
+  const hits = [{ source: 'm.md', section: 'x', preview: 'y' }];
+  assert.strictEqual(U.applyRelevanceGate(hits, '?? ci').length, 1);
+});
+
+test('applyRelevanceGate: 本文が取れないヒットは残す（fail-open）', () => {
+  const hits = [{ source: 'm.md' }];
+  assert.strictEqual(U.applyRelevanceGate(hits, 'loop fix').length, 1);
+});
+
+test('recallMinRatio: 0<r<=1 のみ採用・それ以外は null（OFF）', () => {
+  const save = process.env.ARAG_RECALL_MIN_RATIO;
+  delete process.env.ARAG_RECALL_MIN_RATIO;
+  assert.strictEqual(U.recallMinRatio(), null, '未設定は null');
+  process.env.ARAG_RECALL_MIN_RATIO = '0.5';
+  assert.strictEqual(U.recallMinRatio(), 0.5);
+  for (const v of ['0', '-1', '1.5', 'abc']) {
+    process.env.ARAG_RECALL_MIN_RATIO = v;
+    assert.strictEqual(U.recallMinRatio(), null, `${v} は範囲外/不正→null`);
+  }
+  if (save === undefined) delete process.env.ARAG_RECALL_MIN_RATIO; else process.env.ARAG_RECALL_MIN_RATIO = save;
+});
+
+test('applyRelativeFloor: null は素通し / top×ratio 未満を落とす', () => {
+  const hits = [hit('a', 6), hit('b', 2), hit('c', 0.5)];
+  assert.strictEqual(U.applyRelativeFloor(hits, null).length, 3, 'null は素通し');
+  assert.deepStrictEqual(U.applyRelativeFloor(hits, 0.5).map((h) => h.source), ['a'], 'top6×0.5=3 未満を落とす');
+});
+
+test('applyRelativeFloor: top が非正なら素通し / score なしは残す', () => {
+  assert.strictEqual(U.applyRelativeFloor([hit('a', -1), hit('b', -2)], 0.5).length, 2, 'top<=0 は無意味→素通し');
+  assert.strictEqual(U.applyRelativeFloor([{ source: 'a' }, hit('b', 6)], 0.5).length, 2, 'score なしは残す');
+});
