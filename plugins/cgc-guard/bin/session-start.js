@@ -19,7 +19,7 @@ const RULES = `## cgc-guard: コード編集の必須手順
 2. 編集ツール呼び出し直前のメッセージに「[cgc-check] symbol=<name> risk=<LOW|MEDIUM|HIGH|CRITICAL> callers=<N>」を 1 行出力する
 3. リネームは grep+sed ではなく \`mcp__cgc__rename\` を使う
 
-impact 未確認の編集は PreToolUse フックが deny する。waiver（typo・コメント・フォーマット・cgc 未インデックスのファイル）は
+impact 未確認の編集は PreToolUse フックが deny する。waiver（typo・コメント・フォーマット・module/use 等の宣言追加・既存シンボルを変えない純粋追加・cgc 未インデックスのファイル）は
 「[cgc-skip reason=<理由>]」を 1 行出力してから編集する。docs/設定ファイル（.md/.json/.yml 等）はゲート対象外。
 
 注意: cgc は call graph に強いが type reference（型参照）に弱い。型シンボルで callers が不自然に少ない/0 件のときは
