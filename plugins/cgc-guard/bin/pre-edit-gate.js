@@ -33,6 +33,15 @@ function main() {
   if (cfg.excludeTests && U.isTestPath(target)) return; // テスト編集は対象外 (#189-1)
   if (input.tool_name === 'Write' && !exists(target)) return; // 新規ファイルは既存シンボルへの影響なし
 
+  // graph に存在しないファイル（新規作成直後・未インデックス）は waiver。
+  // 従来は「インデックス済みの可能性」と推測して deny していた偽陽性を、
+  // graph メンバーシップ照合で決定論化する。判定不能時は従来どおりゲート継続。
+  if (U.isConfirmedUnindexed(proj, target)) return;
+
+  // 既存内容を保ったまま module/use 宣言だけを足す純粋追加は、既存シンボルへの
+  // 影響が無い（callers=0 確定）ため context/impact 不要で素通りさせる。
+  if (U.isDeclarationOnlyAddition(input)) return;
+
   const ttlFileMs = cfg.fileTtlMinutes * 60 * 1000;
   const ttlSessionMs = cfg.sessionTtlMinutes * 60 * 1000;
   const approvalTtlMs = cfg.approvalTtlMinutes * 60 * 1000;
@@ -102,8 +111,8 @@ function main() {
     `\n[reason=${reason} deny=${rec.count}/${cfg.denyMax}]` +
     `\n(1) mcp__cgc__context(<対象シンボル>) → mcp__cgc__impact(<対象シンボル>) を実行し、` +
     `次のメッセージに「[cgc-check] symbol=<name> risk=<LOW|MEDIUM|HIGH|CRITICAL> callers=<N>」を1行出力してから編集を再実行する。` +
-    `\n(2) typo・コメント・フォーマット等の軽微変更、または cgc 未インデックスのファイルであれば、` +
-    `次のメッセージに「[cgc-skip reason=<理由>]」を1行出力してから再実行する。` +
+    `\n(2) typo・コメント・フォーマット等の軽微変更、module/use 等の宣言追加・既存シンボルを変えない純粋な追加、` +
+    `または cgc 未インデックスのファイルであれば、次のメッセージに「[cgc-skip reason=<理由>]」を1行出力してから再実行する。` +
     `\n(型シンボルで impact が空振りする場合は rg で参照を確認してから [cgc-check] を出すこと)`;
 
   // risk 段階化 (v0.3.0): セッション内の impact でこのファイル/ディレクトリの

@@ -309,4 +309,143 @@ assert.ok(!U.isTestPath('src/app.ts'));
   assert.ok(!runSessionStart(proj3).includes('破損'), 'plain JSON graph must stay valid');
 }
 
+// ---- 点1: graph メンバーシップで未インデックスファイルを waiver ------------------
+
+{
+  const proj = tmpProject();
+  // 小規模 warn 降格を無効化し、deny 維持を純粋に検証する。
+  fs.writeFileSync(path.join(proj, '.cgc-guard.json'), JSON.stringify({ smallRepoWarnBytes: 0 }));
+  // 実 graph: Repository ノード（rooted 判定用）+ src/main.rs の実ノード。
+  fs.writeFileSync(path.join(proj, '.cgc', 'graph.json'), JSON.stringify({
+    version: 1,
+    nodes: [
+      { id: 1, kind: 'Repository', name: 'p', path: proj },
+      { id: 2, kind: 'Function', name: 'f', path: path.join(proj, 'src', 'main.rs') },
+    ],
+    edges: [],
+  }));
+
+  // util 単体: 既知ファイルは未インデックスでない / 未知ファイルは未インデックス。
+  assert.ok(
+    !U.isConfirmedUnindexed(proj, path.join(proj, 'src', 'main.rs')),
+    'indexed file must NOT be confirmed-unindexed'
+  );
+  assert.ok(
+    U.isConfirmedUnindexed(proj, path.join(proj, 'src', 'brand_new.rs')),
+    'unindexed file must be confirmed-unindexed'
+  );
+  // セパレータ揺れ（/ と \）でも一致すること。
+  assert.ok(
+    !U.isConfirmedUnindexed(proj, proj + '/src/main.rs'),
+    'separator variation must still match the indexed path'
+  );
+
+  const tp = writeTranscript(proj, [{ type: 'user', message: { content: [] } }]);
+  // gate: 未インデックスファイルの編集は証跡なしでも allow。
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit',
+      tool_input: { file_path: path.join(proj, 'src', 'brand_new.rs') },
+      cwd: proj, session_id: 'idx1', transcript_path: tp,
+    })),
+    undefined, 'editing an unindexed file must bypass the gate'
+  );
+  // gate: インデックス済みファイルは従来どおり deny（waiver でゲートを弱めない）。
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit',
+      tool_input: { file_path: path.join(proj, 'src', 'main.rs') },
+      cwd: proj, session_id: 'idx2', transcript_path: tp,
+    })),
+    'deny', 'indexed file must still be gated'
+  );
+}
+
+// 相対パス形式の graph（project root 配下の絶対パスが 1 つも無い）は判定不能扱い。
+{
+  const proj = tmpProject();
+  fs.writeFileSync(path.join(proj, '.cgc', 'graph.json'), JSON.stringify({
+    version: 1,
+    nodes: [{ id: 1, kind: 'Function', name: 'f', path: 'src/main.rs' }], // 相対パス
+    edges: [],
+  }));
+  assert.ok(
+    !U.isConfirmedUnindexed(proj, path.join(proj, 'src', 'whatever.rs')),
+    'a graph without project-rooted absolute paths must be treated as undetermined (no mass-waiver)'
+  );
+}
+
+// gzip graph.json（cgc #210+）でもメンバーシップ判定が成立する。
+{
+  const zlib = require('zlib');
+  const proj = tmpProject();
+  fs.writeFileSync(path.join(proj, '.cgc', 'graph.json'), zlib.gzipSync(Buffer.from(JSON.stringify({
+    version: 1,
+    nodes: [
+      { id: 1, kind: 'Repository', name: 'p', path: proj },
+      { id: 2, kind: 'Function', name: 'f', path: path.join(proj, 'src', 'main.rs') },
+    ],
+    edges: [],
+  }))));
+  assert.ok(
+    !U.isConfirmedUnindexed(proj, path.join(proj, 'src', 'main.rs')),
+    'gzip graph: indexed file recognized'
+  );
+  assert.ok(
+    U.isConfirmedUnindexed(proj, path.join(proj, 'src', 'brand_new.rs')),
+    'gzip graph: unindexed file recognized'
+  );
+}
+
+// ---- 点2: module/use 宣言の純粋追加は impact 不要で素通り ------------------------
+
+{
+  // util 単体。
+  assert.ok(U.isDeclarationOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: { old_string: 'mod a;\nmod b;', new_string: 'mod a;\nmod ai;\nmod b;' },
+  }), 'inserting a mod declaration must be declaration-only');
+  assert.ok(U.isDeclarationOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: { old_string: 'use x::y;', new_string: 'use x::y;\npub use a::b;' },
+  }), 'adding a pub use must be declaration-only');
+  assert.ok(!U.isDeclarationOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: { old_string: 'mod a;', new_string: 'mod a;\nlet x = call();' },
+  }), 'adding a statement must NOT be declaration-only');
+  assert.ok(!U.isDeclarationOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: { old_string: 'fn f() {}', new_string: 'fn g() {}' },
+  }), 'modifying existing code must NOT be declaration-only');
+  assert.ok(!U.isDeclarationOnlyAddition({
+    tool_name: 'Write',
+    tool_input: { old_string: 'mod a;', new_string: 'mod a;\nmod b;' },
+  }), 'only Edit is eligible (Write overwrites wholesale)');
+
+  // gate: インデックス済みファイルでも宣言追加なら証跡なしで allow。
+  const proj = tmpProject();
+  fs.writeFileSync(path.join(proj, '.cgc-guard.json'), JSON.stringify({ smallRepoWarnBytes: 0 }));
+  fs.writeFileSync(path.join(proj, '.cgc', 'graph.json'), JSON.stringify({
+    version: 1,
+    nodes: [
+      { id: 1, kind: 'Repository', name: 'p', path: proj },
+      { id: 2, kind: 'Module', name: 'lib', path: path.join(proj, 'src', 'lib.rs') },
+    ],
+    edges: [],
+  }));
+  const tp = writeTranscript(proj, [{ type: 'user', message: { content: [] } }]);
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit',
+      tool_input: {
+        file_path: path.join(proj, 'src', 'lib.rs'),
+        old_string: 'mod a;',
+        new_string: 'mod a;\npub mod ai;',
+      },
+      cwd: proj, session_id: 'decl1', transcript_path: tp,
+    })),
+    undefined, 'declaration-only addition to an indexed file must bypass the gate'
+  );
+}
+
 console.log('smoke: all assertions passed');

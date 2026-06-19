@@ -96,7 +96,7 @@ Claude Code を開くだけで cgc が有効になる。
 
 ### 2. pre-edit-gate.js（編集前ゲート: deny 自動是正）
 
-PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー (0.2.0):
+PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー (0.4.0):
 
 ```
 対象 = tool_input.file_path
@@ -104,6 +104,11 @@ PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー (0.2.0):
 2. 対象が非コード（.md/.json/.yml/.toml 等の拡張子 denylist）→ allow（waiver: ドキュメント・設定）
 2b. 対象がテストファイル（tests/・*_test.*・*.test.*・*.spec.*）→ allow（#189、excludeTests=false で無効化）
 3. 対象が新規ファイル（fs 不在 + Write）  → allow（既存シンボルへの影響なし。impact は参照側で取れる）
+3c. 対象が graph に未インデックス（v0.4.0: graph.json の path 集合に無いと確認できる）→ allow
+    （新規作成直後・未追跡ファイルの偽陽性 deny を解消。判定不能＝graph 読めない/相対パス graph/
+     リポ外 のときは protective に false＝ゲート継続。詳細は下記「未インデックス waiver」）
+3d. module/use 宣言だけの純粋追加（v0.4.0: 既存行を一字一句保ったまま Rust の mod/use 行のみ追加）
+    → allow（既存シンボルへの影響なし＝callers=0 確定。他言語の宣言追加は従来どおり [cgc-skip]）
 3b. 承認済みファイル（同一セッションで一度ゲートを通過、approvalTtlMinutes 内）→ allow（#189）
 4. 直近の assistant メッセージに [cgc-skip reason=...] / [cgc-check] マーカー → allow
    （注: 近年のハーネスは assistant text を transcript にほぼ永続化しないため best-effort。#185）
@@ -141,6 +146,34 @@ PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー (0.2.0):
 caller 閾値による自動 allow（#189 提案 2）は、ゲート内から cgc を同期 spawn する
 コストが PreToolUse の時間予算に合わないため見送り（将来 record-evidence が
 impact 応答から callers 数を抽出して証跡に同梱する形で再検討）。
+
+#### 未インデックス waiver（v0.4.0: graph メンバーシップ照合）
+
+v0.3.x まで参加判定は「リポに `.cgc/graph.json` があるか」だけで、個々のファイルが
+**実際に graph のノードか**は見ていなかった。そのため新規作成直後・未追跡のファイルまで
+「インデックス済みの可能性」と推測して deny する偽陽性があった（オオカミ少年化 →
+`[cgc-skip]` の機械的乱発 → ゲート形骸化）。v0.4.0 で graph の path 集合と照合し、
+**確実に未インデックスと分かるファイルだけ** waiver する（`util.isConfirmedUnindexed`）。
+
+- **キャッシュ**: graph.json は大きく毎フックで gunzip+parse すると PreToolUse の時間予算に
+  合わないため、`(size, mtime)` をキーに正規化 path 集合を `.cgc/tmp/indexed-paths.json` へ
+  キャッシュする。再 index で graph.json が更新されると stamp が変わり自動で再構築される
+  （新規ファイルが index された瞬間からゲート対象に戻る＝自己修復）。
+- **gzip 対応**: cgc #210+ の gzip スナップショットと旧プレーン JSON の両形式を読む。
+- **安全方向（最重要）**: 判定を誤って「インデックス済みファイルを未インデックス扱い」すると
+  ゲートが無効化される。これを防ぐため、次のときは **false（＝判定不能 → 従来どおりゲート継続）**
+  に倒す: graph が読めない/壊れている / 空 / **project root 配下の絶対パスが 1 つも無い**
+  （相対パス形式の旧 graph 等で全件 waiver する事故の防止）/ 対象がリポ外。
+  waiver は「確実に未インデックス」と言い切れるときだけ発火する。
+
+#### 宣言追加 waiver（v0.4.0: module/use の純粋追加）
+
+既存内容を一字一句保ったまま Rust の `mod` / `use`（`pub` / `pub(crate)` 含む）宣言行だけを
+足す Edit は、既存シンボルへの影響が無い（必ず callers=0）ため impact 分析が無意味。
+行マルチセット差分で「既存行が全て残り、追加行が宣言行のみ」を確認できたら素通りさせる
+（`util.isDeclarationOnlyAddition`）。行途中への挿入も扱えるよう substring 比較ではなく
+行集合の包含で判定する。Rust 以外の言語の宣言追加・判断が必要な純粋追加は従来どおり
+`[cgc-skip]` を使う（deny 文言・SessionStart ルールにも明記）。
 
 ### 3. record-evidence.js（証跡記録）
 
