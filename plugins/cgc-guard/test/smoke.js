@@ -491,4 +491,20 @@ assert.ok(!U.isTestPath('src/app.ts'));
   );
 }
 
+// ---- #225 follow-up: isWatcherLive — heartbeat 鮮度で二重 reindex を回避 -------
+
+{
+  const proj = tmpProject();
+  fs.mkdirSync(path.join(proj, '.cgc', 'tmp'), { recursive: true });
+  // heartbeat 不在 → not live（従来動作にフォールバック）
+  assert.ok(!U.isWatcherLive(proj), 'no heartbeat → watcher not live');
+  // fresh heartbeat → live（hook は full index を skip すべき）
+  fs.writeFileSync(U.watcherHeartbeatFile(proj), String(Date.now()));
+  assert.ok(U.isWatcherLive(proj), 'fresh heartbeat → watcher live');
+  // stale heartbeat（既定 30s 超）→ not live
+  const stale = Date.now() - 120000;
+  fs.utimesSync(U.watcherHeartbeatFile(proj), new Date(stale), new Date(stale));
+  assert.ok(!U.isWatcherLive(proj), 'stale heartbeat → watcher not live');
+}
+
 console.log('smoke: all assertions passed');
