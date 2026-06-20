@@ -96,7 +96,7 @@ Claude Code を開くだけで cgc が有効になる。
 
 ### 2. pre-edit-gate.js（編集前ゲート: deny 自動是正）
 
-PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー (0.4.0):
+PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー (0.4.1):
 
 ```
 対象 = tool_input.file_path
@@ -109,7 +109,12 @@ PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー (0.4.0):
      リポ外 のときは protective に false＝ゲート継続。詳細は下記「未インデックス waiver」）
 3d. module/use 宣言だけの純粋追加（v0.4.0: 既存行を一字一句保ったまま Rust の mod/use 行のみ追加）
     → allow（既存シンボルへの影響なし＝callers=0 確定。他言語の宣言追加は従来どおり [cgc-skip]）
-3b. 承認済みファイル（同一セッションで一度ゲートを通過、approvalTtlMinutes 内）→ allow（#189）
+3b. 承認済み（同一セッションで一度ゲートを通過、approvalTtlMinutes 内）→ allow（#189）
+    v0.4.1: evidenceScope='dir'（既定）では承認を**ディレクトリ単位**で持続させる。
+    同一 dir のどれか 1 ファイルで impact を確認すれば、その dir 内の別ファイル編集は
+    approvalTtlMinutes 内は再確認不要（多ファイル改修の儀式コスト削減・#225 関連。
+    git 操作による再インデックスは evidence/承認を失効させない＝直前確認は引き継がれる）。
+    新しいディレクトリの初回タッチは従来どおり impact 必須。'file' で従来のファイル単位。
 4. 直近の assistant メッセージに [cgc-skip reason=...] / [cgc-check] マーカー → allow
    （注: 近年のハーネスは assistant text を transcript にほぼ永続化しないため best-effort。#185）
 5. 証跡あり（下記 record-evidence: TTL 内 + 対象ファイル一致 or セッションレベル一致）→ allow
