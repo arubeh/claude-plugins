@@ -32,6 +32,7 @@ function denyStateFile(proj, sessionId) {
 }
 function indexStampFile(proj) { return path.join(tmpDir(proj), 'index.stamp.json'); }
 function indexLockDir(proj) { return path.join(tmpDir(proj), 'index.lock'); }
+function watcherHeartbeatFile(proj) { return path.join(tmpDir(proj), 'watcher.heartbeat'); }
 
 function sanitizeId(s) {
   return String(s || 'nosession').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
@@ -74,6 +75,23 @@ function cgcAvailable() {
   } catch { ok = false; }
   writeJsonSafe(cache, { ts: Date.now(), ok });
   return ok;
+}
+
+// ---- MCP watcher 生存判定（二重 reindex 回避）--------------------------------
+// cgc mcp start --watch（既定 ON）の内蔵 watcher は `.cgc/tmp/watcher.heartbeat`
+// を ~5s ごとに更新する。fresh なら watcher が編集 / git 変更を既に増分でメモリへ
+// 反映しているので、PostToolUse hook の full `cgc index` は冗長（graph.json を
+// 二重書き込みし verbatim/plain の path-twin ノードを生む温床）→ skip できる。
+// heartbeat 不在（旧 cgc / watch 無効 / 別プロセス）は false を返し従来動作へ
+// フォールバックする（安全側）。
+
+function isWatcherLive(proj, maxAgeMs = 30000) {
+  try {
+    const st = fs.statSync(watcherHeartbeatFile(proj));
+    return Date.now() - st.mtimeMs < maxAgeMs;
+  } catch {
+    return false;
+  }
 }
 
 // ---- コードファイル判定 ------------------------------------------------------
@@ -451,8 +469,8 @@ function emitWarn(reason) {
 
 module.exports = {
   projectDir, cgcDir, graphFile, metaFile, tmpDir,
-  evidenceFile, denyStateFile, indexStampFile, indexLockDir,
-  isParticipating, resolveCgcBin, cgcAvailable,
+  evidenceFile, denyStateFile, indexStampFile, indexLockDir, watcherHeartbeatFile,
+  isParticipating, resolveCgcBin, cgcAvailable, isWatcherLive,
   isCodeFile, extractCodePaths, lastAssistantText, recentCgcToolUse,
   normPathKey, isConfirmedUnindexed, isDeclarationOnlyAddition,
   loadGuardConfig, isTestPath, recordApproval, isApproved,

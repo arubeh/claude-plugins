@@ -29,6 +29,13 @@ function hookMode() {
   const proj = U.projectDir(input);
   if (!U.isParticipating(proj) || !U.cgcAvailable()) return;
 
+  // 内蔵 watcher が生きているなら、編集 / git 変更はその watcher が増分でメモリへ
+  // 反映し graph.json も更新する。hook がここで full `cgc index` を重ねると
+  // graph.json の二重書き込み（verbatim/plain の path-twin ノードの温床）と
+  // 無駄な再走査になるため skip する（#225 follow-up）。heartbeat 不在＝watcher が
+  // 居ない時のみ、下記の従来どおりの再 index にフォールバックする。
+  if (U.isWatcherLive(proj)) return;
+
   let force = false;
   if (input.tool_name === 'Bash') {
     // git 由来の外部変更（pull/checkout 等）は debounce を無視して即時再 index
