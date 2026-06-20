@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const zlib = require('zlib');
 const { spawnSync } = require('child_process');
 
 // ---- パス解決 -------------------------------------------------------------
@@ -253,6 +254,118 @@ function recentCgcToolUse(transcriptPath, ttlMs = 10 * 60 * 1000, maxBytes = 262
   }
 }
 
+// ---- graph メンバーシップ判定（未インデックスファイルの waiver）---------------
+// 従来ゲートは「.cgc/graph.json があるリポか」しか見ておらず、個々のファイルが
+// 実際に graph のノードかは判定していなかった。そのため新規作成直後・未インデックスの
+// ファイルまで「インデックス済みの可能性」と推測して deny していた（偽陽性）。
+// ここで graph の path 集合と照合し、確実に未インデックスと分かるものだけ waiver する。
+// 安全方向: 判定不能（graph 読めない / 形式不明 / 相対パス graph 等）は false を返し、
+// 従来どおりゲートを継続する（gate を弱める誤 waiver を避ける）。
+
+function indexedPathCacheFile(proj) {
+  return path.join(tmpDir(proj), 'indexed-paths.json');
+}
+
+// セパレータ統一 + 小文字化 + 末尾スラッシュ除去。
+// graph は同一リポに `D:\\...` と `D:/...` を混在させ、Windows はドライブレターの
+// 大文字小文字も揺れるため正規化してから集合照合する。
+function normPathKey(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+// graph.json（cgc #210+ は gzip、それ以前はプレーン JSON）から
+// 実ファイルノードの path（合成ノード `<module:...>` 等は除外）を抽出する。
+function readGraphPaths(proj) {
+  const f = graphFile(proj);
+  const raw = fs.readFileSync(f);
+  const body =
+    raw.length >= 2 && raw[0] === 0x1f && raw[1] === 0x8b
+      ? zlib.gunzipSync(raw).toString('utf8')
+      : raw.toString('utf8');
+  const g = JSON.parse(body);
+  const nodes = Array.isArray(g.nodes) ? g.nodes : [];
+  const out = new Set();
+  for (const n of nodes) {
+    const p = n && n.path;
+    if (typeof p !== 'string' || !p || p.startsWith('<')) continue; // 合成ノード除外
+    out.add(normPathKey(p));
+  }
+  return [...out];
+}
+
+// graph.json の (size, mtime) をキーに正規化パス集合をキャッシュする。
+// graph は大きく、毎フックで gunzip+parse するのは PreToolUse の時間予算に合わない。
+// 失敗時は null（= 判定不能）。
+function loadIndexedPathSet(proj) {
+  let st;
+  try { st = fs.statSync(graphFile(proj)); } catch { return null; }
+  const stamp = `${st.size}:${Math.floor(st.mtimeMs)}`;
+  const cacheFile = indexedPathCacheFile(proj);
+  const cached = readJsonSafe(cacheFile, null);
+  if (cached && cached.stamp === stamp && Array.isArray(cached.paths)) {
+    return new Set(cached.paths);
+  }
+  let paths;
+  try { paths = readGraphPaths(proj); } catch { return null; }
+  writeJsonSafe(cacheFile, { stamp, paths });
+  return new Set(paths);
+}
+
+// target が graph のどのノードにも含まれないと「確信できる」ときだけ true。
+// - graph を読めない / 空 / project root 配下の絶対パスが 1 つも無い（相対パス形式の
+//   旧 graph 等）→ false（判定不能 → ゲート継続）。これにより「全件 waiver でゲート無効化」
+//   という最悪の誤りを構造的に防ぐ。
+// - target がリポ外 → false（このリポの graph で語れないので protective にゲート継続）。
+function isConfirmedUnindexed(proj, target) {
+  const set = loadIndexedPathSet(proj);
+  if (!set || set.size === 0) return false;
+  const projKey = normPathKey(proj);
+  let rooted = false;
+  for (const p of set) {
+    if (p === projKey || p.startsWith(projKey + '/')) { rooted = true; break; }
+  }
+  if (!rooted) return false; // graph のパス形式が想定外 → 判定不能
+  const tgt = normPathKey(target);
+  if (!tgt.startsWith(projKey + '/')) return false; // リポ外
+  return !set.has(tgt);
+}
+
+// ---- 宣言のみの純粋追加判定（impact 不要な waiver）-----------------------------
+// 既存内容を一字一句保ったまま module/use 宣言だけを足す Edit は、既存シンボルへの
+// 影響が無い（必ず callers=0）ため context/impact を強要する意味が無い。儀式コストを
+// 削るために素通りさせる。安全のため Rust の mod/use（pub・pub(crate) 含む）に限定し、
+// 既存テキストの完全保存を必須条件にする（変更を 1 文字でも含むなら false）。
+// 他言語の宣言追加は従来どおり [cgc-skip] を使う（deny 文言にも明記）。
+const DECL_LINE_RE = /^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:mod|use)\s+[^;{}]+;\s*$/;
+
+function isDeclarationOnlyAddition(input) {
+  if (!input || input.tool_name !== 'Edit') return false;
+  const ti = input.tool_input || {};
+  const oldS = ti.old_string;
+  const newS = ti.new_string;
+  if (typeof oldS !== 'string' || typeof newS !== 'string' || oldS === '') return false;
+
+  // 行マルチセットで差分を取る（行途中への挿入も扱えるよう substring 比較はしない）。
+  // 条件: old の各行が new に同数以上残っている（既存内容の完全保存）かつ、
+  // 追加された行がすべて宣言行（または空行）であること。1 行でも既存行が
+  // 消える/変わるなら false（= 変更を含むので通常ゲートに委ねる）。
+  const norm = (s) => s.split('\n').map((l) => l.trim());
+  const newCounts = new Map();
+  for (const l of norm(newS)) newCounts.set(l, (newCounts.get(l) || 0) + 1);
+  for (const l of norm(oldS)) {
+    const c = newCounts.get(l);
+    if (!c) return false; // 既存行が消えた/変わった
+    newCounts.set(l, c - 1);
+  }
+  let added = 0;
+  for (const [l, c] of newCounts) {
+    if (c <= 0 || l === '') continue; // 空行追加は無視
+    if (!DECL_LINE_RE.test(l)) return false;
+    added += c;
+  }
+  return added > 0;
+}
+
 // ---- アトミック mkdir ロック（arag-memory と同方式）---------------------------
 
 function acquireLock(lockPath, { timeoutMs = 0, staleMs = 600000, pollMs = 50 } = {}) {
@@ -341,6 +454,7 @@ module.exports = {
   evidenceFile, denyStateFile, indexStampFile, indexLockDir,
   isParticipating, resolveCgcBin, cgcAvailable,
   isCodeFile, extractCodePaths, lastAssistantText, recentCgcToolUse,
+  normPathKey, isConfirmedUnindexed, isDeclarationOnlyAddition,
   loadGuardConfig, isTestPath, recordApproval, isApproved,
   acquireLock, sleepSync,
   readJsonSafe, writeJsonSafe, readHookInput, emitContext, emitDeny, emitWarn,

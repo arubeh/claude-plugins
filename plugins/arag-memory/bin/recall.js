@@ -76,6 +76,18 @@ function userPrompt(proj, input) {
   locHits = U.applyFloor(locHits, floor);
   globHits = U.applyFloor(globHits, floor);
 
+  // 相対フロア（補・既定OFF）。top スコア比未満を落とす（同言語の弱い裾を絞る env ノブ）。
+  const ratio = U.recallMinRatio();
+  locHits = U.applyRelativeFloor(locHits, ratio);
+  globHits = U.applyRelativeFloor(globHits, ratio);
+
+  // 語彙ゲート（主・既定ON）。クエリと本文の有意語の重なりがゼロのヒットを落とす。
+  // 英語クエリ↔日本語コーパス等の無関係注入（主症状）を直接排除。ARAG_RECALL_GATE=0 で opt-out。
+  if (U.recallGateEnabled()) {
+    locHits = U.applyRelevanceGate(locHits, query);
+    globHits = U.applyRelevanceGate(globHits, query);
+  }
+
   // #P1: scope 横断 dedup（同一文書が local/global 両方にあれば local を優先して 1 度だけ）。
   globHits = U.dedupCrossScope(locHits, globHits, hitKey);
 

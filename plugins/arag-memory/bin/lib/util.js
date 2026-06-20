@@ -243,6 +243,87 @@ function applyFloor(hits, floor) {
   return (hits || []).filter((h) => typeof h.score === 'number' && h.score >= floor);
 }
 
+// ---- 関連度ゲート（corpus 非依存のノイズ抑制・既定ON）------------------------
+// 絶対スコア閾値(recallFloor)は corpus 間でスケールが違い移植不能なため既定OFFのまま
+// 放置され、無関係注入が止まらなかった（英語のツール質問に日本語マニュアルが注入される等）。
+// 語彙ゲートはスコアに依存せず「プロンプトの有意語と本文の重なりがゼロのヒット」を落とす。
+// 重なりゼロの注入（主症状）を直接排除し、同言語で BM25 が拾った関連ヒットは落とさない。
+
+// 既定 ON。`ARAG_RECALL_GATE=0/false/off/no` で無効（従来挙動へ）。
+function recallGateEnabled() {
+  const v = (process.env.ARAG_RECALL_GATE || '').trim().toLowerCase();
+  return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
+}
+
+// クエリから有意語を抽出する純粋関数。ASCII 英数語は長さ≥3、CJK は連続ランの 2-gram
+// （単一文字ランはその 1 文字）。返り値 { ascii: string[], cjk: string[] }（小文字化・重複なし）。
+// 依存ゼロのため日本語の語分割はせず 2-gram で近似する（BM25 と同水準＝同言語の関連ヒットを
+// 過剰に落とさない。重なりが完全にゼロのときだけ落とす）。
+function extractQueryTerms(query) {
+  const q = String(query || '').toLowerCase();
+  const ascii = Array.from(new Set((q.match(/[a-z0-9]+/g) || []).filter((t) => t.length >= 3)));
+  const cjk = [];
+  const seen = new Set();
+  const runs = q.match(/[぀-ヿ㐀-鿿豈-﫿々〆ヵヶ]+/g) || [];
+  for (const run of runs) {
+    if (run.length === 1) {
+      if (!seen.has(run)) { seen.add(run); cjk.push(run); }
+      continue;
+    }
+    for (let i = 0; i + 2 <= run.length; i++) {
+      const g = run.slice(i, i + 2);
+      if (!seen.has(g)) { seen.add(g); cjk.push(g); }
+    }
+  }
+  return { ascii, cjk };
+}
+
+// ヒット本文(section + preview/text)がクエリ有意語のいずれかを含むか（純粋関数）。
+// 本文が取れないヒットは判定不能とみなし残す（fail-open）。source(パス)は誤一致を生むため見ない。
+// ASCII は**語トークン完全一致**（`fix` が `suffix` 等の部分文字列に誤一致しないように。
+// 区切りは `[a-z0-9]+` なので `terminal_fix`→`fix` のような真のトークン重なりは残す）。
+// CJK は語境界が無いため 2-gram の部分文字列一致のまま。
+function hitMatchesQuery(hit, terms) {
+  const body = `${(hit && hit.section) || ''} ${(hit && (hit.preview || hit.text)) || ''}`.toLowerCase();
+  if (!body.trim()) return true;
+  if (terms.ascii.length) {
+    const bodyTokens = new Set(body.match(/[a-z0-9]+/g) || []);
+    for (const t of terms.ascii) if (bodyTokens.has(t)) return true;
+  }
+  for (const g of terms.cjk) if (body.includes(g)) return true;
+  return false;
+}
+
+// 語彙ゲート（純粋関数）。クエリ有意語と本文の重なりがゼロのヒットを落とす。
+// 有意語が 0 個（短い/記号のみクエリ）なら素通し＝過剰ドロップを避ける（fail-open）。
+function applyRelevanceGate(hits, query) {
+  const terms = extractQueryTerms(query);
+  if (terms.ascii.length === 0 && terms.cjk.length === 0) return hits || [];
+  return (hits || []).filter((h) => hitMatchesQuery(h, terms));
+}
+
+// 相対フロア（補・既定OFF）。`ARAG_RECALL_MIN_RATIO`（`RAG_` fallback・0<r<=1）。
+// 同言語の弱い裾を絞る env ノブ。閾値は推測で既定ONにしない。未設定/不正/範囲外は null（OFF）。
+function recallMinRatio() {
+  const raw = process.env.ARAG_RECALL_MIN_RATIO ?? process.env.RAG_RECALL_MIN_RATIO;
+  if (raw == null || String(raw).trim() === '') return null;
+  const r = Number(raw);
+  return Number.isFinite(r) && r > 0 && r <= 1 ? r : null;
+}
+
+// 相対フロア適用（純粋関数）。ratio=null は素通し。top（最大 score）の ratio 倍未満を落とす。
+// score を持たないヒット・top が非正のときは判定不能/無意味とみなし素通し（fail-open）。
+function applyRelativeFloor(hits, ratio) {
+  if (ratio == null) return hits || [];
+  const arr = hits || [];
+  const scores = arr.map((h) => h.score).filter((s) => typeof s === 'number');
+  if (scores.length === 0) return arr;
+  const top = Math.max(...scores);
+  if (!(top > 0)) return arr;
+  const min = top * ratio;
+  return arr.filter((h) => typeof h.score !== 'number' || h.score >= min);
+}
+
 // セッション内既出抑制の有効可否（既定 ON・`ARAG_RECALL_SESSION_DEDUP=0/false/off/no` で OFF）。
 function sessionDedupEnabled() {
   const v = (process.env.ARAG_RECALL_SESSION_DEDUP || '').trim().toLowerCase();
@@ -372,6 +453,8 @@ module.exports = {
   acquireLock, sleepSync,
   scrubSecrets,
   recallFloor, parseFloor, applyFloor,
+  recallGateEnabled, extractQueryTerms, hitMatchesQuery, applyRelevanceGate,
+  recallMinRatio, applyRelativeFloor,
   sessionDedupEnabled, recallSeenFile, dedupAgainstSeen,
   deepNudgeEnabled, shouldDeepNudge,
   globalReserved, dedupCrossScope, mergeReserved,
