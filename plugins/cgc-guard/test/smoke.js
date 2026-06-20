@@ -229,6 +229,49 @@ assert.ok(!U.isTestPath('src/app.ts'));
   );
 }
 
+// ---- #225: dir スコープ承認 — 1ファイルで確認すれば同dirの兄弟は承認TTL内素通り ----
+
+{
+  const proj = tmpProject();
+  // fileA をフォールバック証跡(tool_use)で通す → ディレクトリ単位の承認が記録される。
+  const tp = writeTranscript(proj, [
+    { type: 'assistant', timestamp: new Date().toISOString(), message: { content: [
+      { type: 'tool_use', name: 'mcp__cgc__impact' },
+    ] } },
+  ]);
+  const dir = path.join(proj, 'crates', 'p', 'src');
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit',
+      tool_input: { file_path: path.join(dir, 'a.rs') },
+      cwd: proj, session_id: 'dirapp', transcript_path: tp,
+    })),
+    undefined, 'first edit passes via tool_use evidence and records dir approval'
+  );
+
+  // 兄弟ファイル b.rs を「証跡なし・空 transcript」で編集 → dir 承認で素通り。
+  // ファイル単位承認だった頃は b.rs 初回として deny されていた摩擦をここで解消。
+  const emptyTp = writeTranscript(proj, [{ type: 'user', message: { content: [] } }]);
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit',
+      tool_input: { file_path: path.join(dir, 'b.rs') },
+      cwd: proj, session_id: 'dirapp', transcript_path: emptyTp,
+    })),
+    undefined, 'sibling file in an approved directory must bypass via dir-scoped approval (#225)'
+  );
+
+  // 別ディレクトリの初回は依然 deny（gate を弱めていない）。
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit',
+      tool_input: { file_path: path.join(proj, 'crates', 'q', 'src', 'c.rs') },
+      cwd: proj, session_id: 'dirapp', transcript_path: emptyTp,
+    })),
+    'deny', 'a different directory must still require its own impact check'
+  );
+}
+
 // ---- v0.3.0: risk 段階化 — 既知 LOW は TTL 切れ後も warn、CRITICAL は deny -------
 
 {

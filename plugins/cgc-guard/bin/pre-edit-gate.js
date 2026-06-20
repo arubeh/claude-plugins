@@ -46,16 +46,22 @@ function main() {
   const ttlSessionMs = cfg.sessionTtlMinutes * 60 * 1000;
   const approvalTtlMs = cfg.approvalTtlMinutes * 60 * 1000;
   const base = path.basename(String(target)).toLowerCase();
+  const targetDir = normDir(path.dirname(String(target)));
+  // 承認キャッシュのキー。evidenceScope='dir' では「ディレクトリ単位」で承認を
+  // 持続させ、同一ディレクトリ内の別ファイル編集に毎回 impact を強要する儀式
+  // コストをなくす（evidence 照合の dir スコープと整合）。'file' では従来どおり
+  // ファイル名単位。新しいディレクトリの初回タッチは引き続き impact が必須。
+  const approvalKey = cfg.evidenceScope === 'dir' ? `dir:${targetDir}` : base;
 
-  // 一度確認を通したファイルは TTL 内は再確認不要 (#189-4)。
-  if (U.isApproved(proj, input.session_id, base, approvalTtlMs)) return;
+  // 一度確認を通したファイル/ディレクトリは TTL 内は再確認不要 (#189-4)。
+  if (U.isApproved(proj, input.session_id, approvalKey, approvalTtlMs)) return;
 
   // 直近 assistant メッセージのマーカー（waiver / 自己申告の impact 実施証跡）。
   // ハーネスによっては text が transcript に残らないため best-effort (#185)。
   const lastText = U.lastAssistantText(input.transcript_path);
   if (/\[cgc-skip\b/.test(lastText)) return;
   if (/\[cgc-check\]/.test(lastText)) {
-    U.recordApproval(proj, input.session_id, base, approvalTtlMs);
+    U.recordApproval(proj, input.session_id, approvalKey, approvalTtlMs);
     return;
   }
 
@@ -66,7 +72,6 @@ function main() {
   const now = Date.now();
   const ev = U.readJsonSafe(U.evidenceFile(proj, input.session_id), { entries: [] });
   const entries = Array.isArray(ev.entries) ? ev.entries : [];
-  const targetDir = normDir(path.dirname(String(target)));
   const matchesTarget = (p) =>
     p.toLowerCase().endsWith(base) ||
     (cfg.evidenceScope === 'dir' && normDir(path.dirname(p)) === targetDir);
@@ -75,7 +80,7 @@ function main() {
   );
   const sessionHit = entries.some((e) => now - e.ts < ttlSessionMs);
   if (fileHit || sessionHit) {
-    U.recordApproval(proj, input.session_id, base, approvalTtlMs);
+    U.recordApproval(proj, input.session_id, approvalKey, approvalTtlMs);
     return;
   }
 
@@ -84,7 +89,7 @@ function main() {
   // context/impact 実行（TTL 内）を直接検出する。tool_use エントリは
   // assistant text と違い確実に永続化される（実測済み）。
   if (U.recentCgcToolUse(input.transcript_path, ttlFileMs)) {
-    U.recordApproval(proj, input.session_id, base, approvalTtlMs);
+    U.recordApproval(proj, input.session_id, approvalKey, approvalTtlMs);
     return;
   }
 
