@@ -45,6 +45,8 @@ htmlcov/
 # acdp (Browser MCP) outputs
 test-results/
 references/
+# acdp per-machine mode config (checkout 全員に extension 等を強制しない)
+.acdp.json
 
 # Claude Code runtime state (ScheduleWakeup / /loop dynamic runner lock)
 .claude/scheduled_tasks.lock
