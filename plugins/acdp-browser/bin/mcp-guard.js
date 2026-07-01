@@ -20,14 +20,23 @@
 // extension モードのペアリング値（port/token）はセッションを跨いで固定しないと拡張側で
 // 毎回再設定が必要になるため、port は既定 9333、token は ~/.acode/acdp-ext-token に
 // 自動生成・永続化して ACDP_EXT_TOKEN 環境変数で子プロセスへ渡す。
+//
+// ---- 子プロセスのライフサイクル（孤児 acdp 対策）----
+// extension は固定ポート(9333)を共有するため、前セッションの acdp が異常終了で残留すると
+// 新しい acdp が bind できず初期化が -32000（もしくは 0 tools）で失敗する。これを 2 段で防ぐ:
+//   ① 起動前ポート回収: extension で spawn する前に、対象ポートを LISTEN している「acdp」
+//      プロセスだけを kill する（他アプリは触らない）。ハード kill で孤児が出ても次回起動が
+//      必ず掃除するため、この経路が主対策。
+//   ② 切断時の子終了: spawnSync ではなく非同期 spawn で起動し、guard 自身がシグナル/exit を
+//      受けたら子プロセスツリーを kill する。孤児の発生自体を減らす副対策。
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { spawnSync } = require('child_process');
+const { spawnSync, spawn } = require('child_process');
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const DEFAULT_EXT_PORT = 9333;
 
 // ---- acdp バイナリ解決（cgc-guard の resolveCgcBin / cgcAvailable と同方式）----
@@ -105,10 +114,12 @@ function resolveExtToken(cfg) {
 function buildLaunchSpec(cfg) {
   const args = [];
   const env = {};
+  let extPort = null;
   const mode = process.env.ACDP_MODE || cfg.mode || 'headed';
   if (mode === 'extension') {
     args.push('--backend', 'extension');
     const port = Number.isInteger(cfg.extPort) && cfg.extPort > 0 ? cfg.extPort : DEFAULT_EXT_PORT;
+    extPort = port;
     args.push('--ext-port', String(port));
     const token = resolveExtToken(cfg);
     if (token) env.ACDP_EXT_TOKEN = token;
@@ -125,7 +136,67 @@ function buildLaunchSpec(cfg) {
   if (Array.isArray(cfg.args)) {
     for (const a of cfg.args) if (typeof a === 'string') args.push(a);
   }
-  return { args, env };
+  return { args, env, mode, extPort };
+}
+
+// ---- 子プロセスのライフサイクル管理（孤児 acdp 回収・終了伝播）------------------
+
+// 指定 PID のプロセスツリーを強制終了（best-effort）。Windows は taskkill /T で子孫も、
+// Unix は SIGKILL。失敗（既に死亡・権限無し等）は握りつぶす。
+function killPidTree(pid) {
+  if (!pid) return;
+  try {
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 3000, windowsHide: true });
+    } else {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* noop */ }
+    }
+  } catch { /* noop */ }
+}
+
+// 指定 PID が acdp プロセスかを確認（無関係アプリの誤 kill を防ぐ安全弁）。
+function isAcdpProcess(pid) {
+  try {
+    if (process.platform === 'win32') {
+      const r = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'],
+        { timeout: 3000, encoding: 'utf8', windowsHide: true });
+      return /acdp/i.test(r.stdout || '');
+    }
+    const r = spawnSync('ps', ['-p', String(pid), '-o', 'comm='], { timeout: 3000, encoding: 'utf8' });
+    return /acdp/i.test(r.stdout || '');
+  } catch { return false; }
+}
+
+// 指定 TCP ポートを LISTEN しているプロセスの PID 一覧（best-effort・空配列フォールバック）。
+function findTcpListenerPids(port) {
+  const pids = new Set();
+  try {
+    if (process.platform === 'win32') {
+      const r = spawnSync('netstat', ['-ano', '-p', 'tcp'],
+        { timeout: 3000, encoding: 'utf8', windowsHide: true });
+      for (const line of (r.stdout || '').split(/\r?\n/)) {
+        // 例:  TCP    127.0.0.1:9333    0.0.0.0:0    LISTENING    48752
+        const m = line.match(/^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/);
+        if (m && Number(m[1]) === port) pids.add(Number(m[2]));
+      }
+    } else {
+      const r = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'],
+        { timeout: 3000, encoding: 'utf8' });
+      for (const tok of (r.stdout || '').split(/\s+/)) {
+        const n = Number(tok.trim());
+        if (Number.isInteger(n) && n > 0) pids.add(n);
+      }
+    }
+  } catch { /* noop */ }
+  return [...pids];
+}
+
+// extension 固定ポートを掴んだままの残留 acdp を起動前に回収する。acdp と確認できた
+// PID だけを kill するので、たまたま同ポートを使う別アプリは巻き込まない。
+function reclaimExtPort(port) {
+  for (const pid of findTcpListenerPids(port)) {
+    if (isAcdpProcess(pid)) killPidTree(pid);
+  }
 }
 
 // ---- 空 MCP サーバ（0 tools・接続だけ成立させて "failed" 表示を防ぐ）----------
@@ -197,14 +268,36 @@ function main() {
     return;
   }
 
-  const { args, env } = buildLaunchSpec(loadModeConfig(proj));
-  const r = spawnSync(resolveAcdpBin(), args, {
+  const spec = buildLaunchSpec(loadModeConfig(proj));
+
+  // extension は固定ポート共有。前セッションの残留 acdp を先に回収してから起動する（①）。
+  if (spec.mode === 'extension' && spec.extPort) {
+    reclaimExtPort(spec.extPort);
+  }
+
+  const child = spawn(resolveAcdpBin(), spec.args, {
     cwd: proj,
     stdio: 'inherit',
     windowsHide: true,
-    env: { ...process.env, ...env },
+    env: { ...process.env, ...spec.env },
   });
-  process.exit(r.status === null ? 1 : r.status);
+
+  // 子の終了で guard も同じ終了コードで抜ける。以降 killChild は no-op にする。
+  let childExited = false;
+  child.on('exit', (code, signal) => {
+    childExited = true;
+    process.exit(code === null ? (signal ? 1 : 0) : code);
+  });
+  child.on('error', () => { childExited = true; process.exit(1); });
+
+  // 切断時の子終了（②）。guard がシグナル/exit を受けたら子プロセスツリーを kill。
+  // ハード kill（シグナル不達）で漏れた孤児は次回起動の reclaimExtPort が掃除する。
+  const killChild = () => { if (!childExited && child.pid) killPidTree(child.pid); };
+  const onSignal = () => { killChild(); process.exit(0); };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
+  process.on('SIGHUP', onSignal);
+  process.on('exit', killChild);
 }
 
 main();
