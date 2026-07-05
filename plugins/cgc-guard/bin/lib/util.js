@@ -384,6 +384,47 @@ function isDeclarationOnlyAddition(input) {
   return added > 0;
 }
 
+// ---- インラインなテスト追加の waiver 判定 -----------------------------------
+// isTestPath はパス基準なので `crates/foo/src/build.rs` 内に `#[cfg(test)] mod
+// tests` や `#[test] fn` をインラインで足す編集を捕捉できない（本番ファイル扱い
+// で deny → 都度 [cgc-skip] 手打ちの摩擦）。だがこれは実質テスト編集であり、既存
+// シンボルを一切変えない純粋追加なら impact は不要。
+//
+// 安全条件（すべて満たすときだけ waiver）:
+//   - Edit のみ。old/new が文字列で old 非空。
+//   - old が new の (共通 prefix + 共通 suffix) を完全被覆 = 単一箇所への連続挿入で、
+//     既存内容が 1 文字も変わらない。複数箇所に散る/既存を書き換える編集は false。
+//   - 挿入片がテスト項目の「定義」を含む: Rust `#[test]`/`#[cfg(test)]`/`#[tokio::test]`、
+//     Python `def test_`、JS/TS の `describe(`/`it(`/`test('...')`（BDD/Jest 慣用）。
+//     単なる `test(x)` 呼び出し等は対象外（誤 waiver を避けるため文字列名を要求）。
+const TEST_ADDITION_RE =
+  /#\[\s*(?:tokio::)?test\s*\]|#\[\s*cfg\s*\(\s*test\s*\)\s*\]|(?:^|\n)\s*def\s+test_\w|(?:^|\n)\s*(?:it|describe)\s*\(|(?:^|\n)\s*test\s*\(\s*['"`]/;
+
+function isTestOnlyAddition(input) {
+  if (!input || input.tool_name !== 'Edit') return false;
+  const ti = input.tool_input || {};
+  const oldS = ti.old_string;
+  const newS = ti.new_string;
+  if (typeof oldS !== 'string' || typeof newS !== 'string' || oldS === '') return false;
+  if (newS.length <= oldS.length) return false;
+  // 共通 prefix。
+  let i = 0;
+  while (i < oldS.length && oldS.charCodeAt(i) === newS.charCodeAt(i)) i++;
+  // 共通 suffix（prefix と重ならない範囲）。
+  let j = 0;
+  while (
+    j < oldS.length - i &&
+    oldS.charCodeAt(oldS.length - 1 - j) === newS.charCodeAt(newS.length - 1 - j)
+  ) {
+    j++;
+  }
+  // old 全体が prefix+suffix で被覆される = 既存内容不変の単一連続挿入。
+  if (i + j !== oldS.length) return false;
+  const insert = newS.slice(i, newS.length - j);
+  if (insert.trim() === '') return false;
+  return TEST_ADDITION_RE.test(insert);
+}
+
 // ---- アトミック mkdir ロック（arag-memory と同方式）---------------------------
 
 function acquireLock(lockPath, { timeoutMs = 0, staleMs = 600000, pollMs = 50 } = {}) {
@@ -472,7 +513,7 @@ module.exports = {
   evidenceFile, denyStateFile, indexStampFile, indexLockDir, watcherHeartbeatFile,
   isParticipating, resolveCgcBin, cgcAvailable, isWatcherLive,
   isCodeFile, extractCodePaths, lastAssistantText, recentCgcToolUse,
-  normPathKey, isConfirmedUnindexed, isDeclarationOnlyAddition,
+  normPathKey, isConfirmedUnindexed, isDeclarationOnlyAddition, isTestOnlyAddition,
   loadGuardConfig, isTestPath, recordApproval, isApproved,
   acquireLock, sleepSync,
   readJsonSafe, writeJsonSafe, readHookInput, emitContext, emitDeny, emitWarn,
