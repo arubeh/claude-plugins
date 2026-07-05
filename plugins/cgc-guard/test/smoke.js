@@ -491,6 +491,101 @@ assert.ok(!U.isTestPath('src/app.ts'));
   );
 }
 
+// ---- 点3: 本番ファイル内インラインのテスト追加は impact 不要で素通り -----------
+
+{
+  // util 単体: 既存不変の単一挿入で挿入片がテスト定義なら true。
+  assert.ok(U.isTestOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: {
+      old_string: '    #[test]\n    fn existing() {}',
+      new_string: '    #[test]\n    fn added() { assert!(true); }\n\n    #[test]\n    fn existing() {}',
+    },
+  }), 'inserting a #[test] fn ahead of an existing test must be test-only');
+  assert.ok(U.isTestOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: {
+      old_string: 'pub fn prod() {}',
+      new_string: 'pub fn prod() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}',
+    },
+  }), 'appending a #[cfg(test)] mod must be test-only');
+  assert.ok(U.isTestOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: {
+      old_string: 'def prod():\n    return 1',
+      new_string: 'def prod():\n    return 1\n\ndef test_prod():\n    assert prod() == 1',
+    },
+  }), 'appending a def test_ must be test-only (python)');
+  assert.ok(U.isTestOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: {
+      old_string: 'export const x = 1;',
+      new_string: "export const x = 1;\nit('works', () => { expect(x).toBe(1); });",
+    },
+  }), 'appending an it() block must be test-only (js/ts)');
+
+  // 誤 waiver を避ける: 既存書き換え・非テスト挿入・呼び出しのみの挿入は false。
+  assert.ok(!U.isTestOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: { old_string: 'fn f() { a(); }', new_string: 'fn f() { a(); b(); }' },
+  }), 'inserting a call into an existing fn must NOT be test-only');
+  assert.ok(!U.isTestOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: { old_string: 'fn a() {}', new_string: 'fn a() {}\nfn helper() {}' },
+  }), 'appending a non-test fn must NOT be test-only');
+  assert.ok(!U.isTestOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: { old_string: 'let x = 1;', new_string: 'let x = 1;\ntest(x);' },
+  }), 'a bare test(x) call (no string name) must NOT be test-only');
+  assert.ok(!U.isTestOnlyAddition({
+    tool_name: 'Edit',
+    tool_input: { old_string: 'fn f() {}', new_string: 'fn g() {}' },
+  }), 'modifying existing code must NOT be test-only');
+  assert.ok(!U.isTestOnlyAddition({
+    tool_name: 'Write',
+    tool_input: { old_string: 'a', new_string: 'a\n#[test]\nfn t() {}' },
+  }), 'only Edit is eligible');
+
+  // gate: インデックス済み本番ファイルでもインライン #[test] 追記なら証跡なしで allow。
+  const proj = tmpProject();
+  fs.writeFileSync(path.join(proj, '.cgc-guard.json'), JSON.stringify({ smallRepoWarnBytes: 0 }));
+  fs.writeFileSync(path.join(proj, '.cgc', 'graph.json'), JSON.stringify({
+    version: 1,
+    nodes: [
+      { id: 1, kind: 'Repository', name: 'p', path: proj },
+      { id: 2, kind: 'Function', name: 'build_graph', path: path.join(proj, 'src', 'build.rs') },
+    ],
+    edges: [],
+  }));
+  const tp = writeTranscript(proj, [{ type: 'user', message: { content: [] } }]);
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit',
+      tool_input: {
+        file_path: path.join(proj, 'src', 'build.rs'),
+        old_string: '    #[test]\n    fn existing_test() {}',
+        new_string:
+          '    #[test]\n    fn new_test() { assert!(true); }\n\n    #[test]\n    fn existing_test() {}',
+      },
+      cwd: proj, session_id: 'test1', transcript_path: tp,
+    })),
+    undefined, 'inline #[test] addition to an indexed production file must bypass the gate'
+  );
+  // 対照: 同ファイルへの本番コード変更は従来どおり deny（ゲートを弱めていない）。
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit',
+      tool_input: {
+        file_path: path.join(proj, 'src', 'build.rs'),
+        old_string: 'fn build_graph() { a(); }',
+        new_string: 'fn build_graph() { a(); b(); }',
+      },
+      cwd: proj, session_id: 'test1b', transcript_path: tp,
+    })),
+    'deny', 'a production-code change to an indexed file must still be gated'
+  );
+}
+
 // ---- #225 follow-up: isWatcherLive — heartbeat 鮮度で二重 reindex を回避 -------
 
 {

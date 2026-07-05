@@ -109,6 +109,11 @@ PreToolUse(Edit|Write|NotebookEdit) で発火。判定フロー (0.4.1):
      リポ外 のときは protective に false＝ゲート継続。詳細は下記「未インデックス waiver」）
 3d. module/use 宣言だけの純粋追加（v0.4.0: 既存行を一字一句保ったまま Rust の mod/use 行のみ追加）
     → allow（既存シンボルへの影響なし＝callers=0 確定。他言語の宣言追加は従来どおり [cgc-skip]）
+3e. 本番ファイル内のインラインなテスト追加（v0.4.3: 既存内容を 1 文字も変えない単一挿入で、
+    挿入片が Rust `#[test]`/`#[cfg(test)]`/`#[tokio::test]`・Python `def test_`・JS/TS の
+    `describe(`/`it(`/`test('...')` を含む）→ allow（excludeTests=false で無効化）。
+    パス基準の 2b では捕捉できない `build.rs` 内 `#[cfg(test)] mod tests` 追記等の儀式コストを
+    解消。既存内容の完全保存を必須にするため本番コード変更や呼び出し挿入は従来どおり deny。
 3b. 承認済み（同一セッションで一度ゲートを通過、approvalTtlMinutes 内）→ allow（#189）
     v0.4.1: evidenceScope='dir'（既定）では承認を**ディレクトリ単位**で持続させる。
     同一 dir のどれか 1 ファイルで impact を確認すれば、その dir 内の別ファイル編集は

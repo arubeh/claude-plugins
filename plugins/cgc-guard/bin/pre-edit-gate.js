@@ -42,6 +42,11 @@ function main() {
   // 影響が無い（callers=0 確定）ため context/impact 不要で素通りさせる。
   if (U.isDeclarationOnlyAddition(input)) return;
 
+  // 本番ファイル内にインラインで書くテスト追加（`build.rs` 内の `#[cfg(test)]`
+  // / `#[test] fn` 追記など）は isTestPath では捕捉できないが実質テスト編集。
+  // 既存内容を変えない単一挿入で挿入片がテスト定義なら waiver（excludeTests と同旨）。
+  if (cfg.excludeTests && U.isTestOnlyAddition(input)) return;
+
   const ttlFileMs = cfg.fileTtlMinutes * 60 * 1000;
   const ttlSessionMs = cfg.sessionTtlMinutes * 60 * 1000;
   const approvalTtlMs = cfg.approvalTtlMinutes * 60 * 1000;
