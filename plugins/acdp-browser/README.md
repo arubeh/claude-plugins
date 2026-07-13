@@ -4,7 +4,7 @@ acdp (Browser/CDP) の **MCP 提供プラグイン**。Chrome DevTools Protocol 
 Playwright MCP 互換の `browser_*` ツール群を提供し、ブラウザを直接操作して
 UI 動作確認・E2E を行えるようにする。`/ui-test` スキルと ui-tester エージェントを同梱。
 
-cgc-guard / arag-memory と同じく、本体機能は外部バイナリ（acdp）が担い、
+cgc-guard と同じく、本体機能は外部バイナリ（acdp）が担い、
 プラグインは「ユーザー全体への MCP 登録 + 起動ガード + 利用ワークフロー
 （スキル・エージェント）」を受け持つ。
 

@@ -24,16 +24,6 @@
         "name": "arubeh"
       },
       "keywords": ["acdp", "browser", "cdp", "playwright-mcp", "ui-test", "e2e"]
-    },
-    {
-      "name": "arag-memory",
-      "source": "./plugins/arag-memory",
-      "description": "arag を記憶バックエンドにした Claude Code 継続学習プラグイン。recall/capture を二層（フック＋MCP）で行い、Stop フックで capture の棚卸しをセッション1回だけ強制（下書き忘れ対策）、汎用化リライト済みの知識のみ全PJ共通 global へ自動昇格（安定 id upsert・重複ガード付き）。インストール=オプトイン・未参加PJでは no-op。",
-      "version": "0.3.0",
-      "author": {
-        "name": "arubeh"
-      },
-      "keywords": ["rag", "memory", "arag", "recall", "capture", "learning-loop"]
     }
   ]
 }
