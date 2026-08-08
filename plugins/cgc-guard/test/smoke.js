@@ -602,4 +602,38 @@ assert.ok(!U.isTestPath('src/app.ts'));
   assert.ok(!U.isWatcherLive(proj), 'stale heartbeat → watcher not live');
 }
 
+
+// ---- Bash rm ゲートのパス抽出は rm 系セグメント限定（連結コマンドの誤 deny 防止）------
+
+{
+  const proj = tmpProject();
+  // 連結コマンド: rm の対象は一時フォルダだけ → 後続 git commit の引数でゲートしない
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Bash',
+      tool_input: { command: 'rm -rf tmp && git commit -m x -- src/lib.rs' },
+      cwd: proj, session_id: 'bash-rm-1',
+    })),
+    undefined, 'rm segment without code paths must not gate on unrelated commit args'
+  );
+  // 素の rm はこれまでどおりゲートされる
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Bash',
+      tool_input: { command: 'rm src/lib.rs' },
+      cwd: proj, session_id: 'bash-rm-2',
+    })),
+    'deny', 'plain rm of an indexed code file must still be gated'
+  );
+  // del セグメントのパスだけを見る（後続の node コマンドは無関係）
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Bash',
+      tool_input: { command: 'del src/app.ts; node scripts/run.js' },
+      cwd: proj, session_id: 'bash-rm-3',
+    })),
+    'deny', 'del segment path must be gated while trailing commands are ignored'
+  );
+}
+
 console.log('smoke: all assertions passed');

@@ -187,12 +187,18 @@ function effectiveMode(cfg, proj) {
 }
 
 // ゲート対象のファイルパスを解決する。Bash は rm / git rm のみ対象（README v1 スコープ）。
+// パス抽出は rm 系セグメントだけから行う — 「rm -rf 一時フォルダ && git commit -- src/a.rs」の
+// ような連結コマンドで、rm の対象でない引数（commit 対象・node のスクリプト等）を誤って
+// ゲートしない（kbweb 実測: 1 日で約 8 往復の誤 deny を誘発していた）。
 function resolveTarget(input) {
   const ti = input.tool_input || {};
   if (input.tool_name === 'Bash') {
     const cmd = String(ti.command || '');
-    if (!/(^|[;&|]\s*)(git\s+rm|rm|del|Remove-Item)\b/.test(cmd)) return null;
-    const paths = U.extractCodePaths(cmd);
+    const segments = cmd
+      .split(/[;&|]+/)
+      .filter((s) => /^\s*(git\s+rm|rm|del|Remove-Item)\b/.test(s));
+    if (!segments.length) return null;
+    const paths = segments.flatMap((s) => U.extractCodePaths(s));
     return paths.length ? paths[0] : null;
   }
   return ti.file_path || ti.notebook_path || null;
