@@ -292,7 +292,11 @@ function normPathKey(p) {
 }
 
 // graph.json（cgc #210+ は gzip、それ以前はプレーン JSON）から
-// 実ファイルノードの path（合成ノード `<module:...>` 等は除外）を抽出する。
+// **シンボルを持つ**ファイルの path を抽出する（合成ノード `<module:...>` と、
+// File/Repository のような骨格ノードは除外）。File ノードしか無いパスはシンボル 0 件
+// ＝ context/impact が空振りするだけなので「未インデックス」と同じ扱いにする
+// （実例: 旧 graph に残った .claude 配下 .js の File ノードが、impact 不能なのに
+// ゲートだけ発動して [cgc-skip] を強要する摩擦になった）。
 function readGraphPaths(proj) {
   const f = graphFile(proj);
   const raw = fs.readFileSync(f);
@@ -306,6 +310,7 @@ function readGraphPaths(proj) {
   for (const n of nodes) {
     const p = n && n.path;
     if (typeof p !== 'string' || !p || p.startsWith('<')) continue; // 合成ノード除外
+    if (n.kind === 'File' || n.kind === 'Repository') continue; // シンボル非保有の骨格ノード
     out.add(normPathKey(p));
   }
   return [...out];
@@ -317,7 +322,9 @@ function readGraphPaths(proj) {
 function loadIndexedPathSet(proj) {
   let st;
   try { st = fs.statSync(graphFile(proj)); } catch { return null; }
-  const stamp = `${st.size}:${Math.floor(st.mtimeMs)}`;
+  // v2: 集合のセマンティクス変更（シンボル保有パスのみ）に合わせて版を混ぜる。
+  // 混ぜないと旧セマンティクスの indexed-paths.json キャッシュが生き残る。
+  const stamp = `v2:${st.size}:${Math.floor(st.mtimeMs)}`;
   const cacheFile = indexedPathCacheFile(proj);
   const cached = readJsonSafe(cacheFile, null);
   if (cached && cached.stamp === stamp && Array.isArray(cached.paths)) {

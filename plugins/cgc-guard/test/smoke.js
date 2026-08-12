@@ -636,4 +636,75 @@ assert.ok(!U.isTestPath('src/app.ts'));
   );
 }
 
+// ---- File ノードだけのパスは「シンボル 0 件＝未インデックス扱い」で waiver -------
+// 実例: 旧 graph に残った .claude 配下 .js（File ノードのみ）が impact 不能なのに
+// ゲートだけ発動し、[cgc-skip] を毎回強要する摩擦になった。
+{
+  const proj = tmpProject();
+  fs.writeFileSync(path.join(proj, '.cgc-guard.json'), JSON.stringify({ smallRepoWarnBytes: 0 }));
+  fs.writeFileSync(path.join(proj, '.cgc', 'graph.json'), JSON.stringify({
+    version: 1,
+    nodes: [
+      { id: 1, kind: 'Repository', name: 'p', path: proj },
+      { id: 2, kind: 'File', name: 'doctor.js', path: path.join(proj, '.claude', 'scripts', 'doctor.js') },
+      { id: 3, kind: 'Function', name: 'f', path: path.join(proj, 'src', 'main.rs') },
+    ],
+    edges: [],
+  }));
+  assert.ok(
+    U.isConfirmedUnindexed(proj, path.join(proj, '.claude', 'scripts', 'doctor.js')),
+    'a File-node-only path (zero symbols) must be treated as unindexed'
+  );
+  assert.ok(
+    !U.isConfirmedUnindexed(proj, path.join(proj, 'src', 'main.rs')),
+    'a symbol-bearing path must stay gated'
+  );
+  const tp = writeTranscript(proj, [{ type: 'user', message: { content: [] } }]);
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit',
+      tool_input: { file_path: path.join(proj, '.claude', 'scripts', 'doctor.js') },
+      cwd: proj, session_id: 'file-only-1', transcript_path: tp,
+    })),
+    undefined, 'editing a File-node-only path must bypass the gate'
+  );
+}
+
+// ---- [cgc-skip] も承認キャッシュに記録される（[cgc-check] と対称） ---------------
+// 記録しないと transcript の text 検出（best-effort）が取りこぼした次の編集で
+// 再 deny され、宣言を 2〜3 回打つ摩擦になる。
+{
+  const proj = tmpProject();
+  fs.writeFileSync(path.join(proj, '.cgc-guard.json'), JSON.stringify({ smallRepoWarnBytes: 0 }));
+  fs.writeFileSync(path.join(proj, '.cgc', 'graph.json'), JSON.stringify({
+    version: 1,
+    nodes: [
+      { id: 1, kind: 'Repository', name: 'p', path: proj },
+      { id: 2, kind: 'Function', name: 'f', path: path.join(proj, 'src', 'main.rs') },
+    ],
+    edges: [],
+  }));
+  const target = path.join(proj, 'src', 'main.rs');
+  // 1 回目: [cgc-skip] マーカーつき transcript → allow ＋承認キャッシュへ記録
+  const tpSkip = writeTranscript(proj, [
+    { type: 'assistant', message: { content: [{ type: 'text', text: '[cgc-skip reason=test]' }] } },
+  ]);
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit', tool_input: { file_path: target },
+      cwd: proj, session_id: 'skip-cache', transcript_path: tpSkip,
+    })),
+    undefined, 'cgc-skip marker must allow'
+  );
+  // 2 回目: マーカーの無い transcript（text 取りこぼし相当）でも承認キャッシュで通る
+  const tpPlain = writeTranscript(proj, [{ type: 'user', message: { content: [] } }]);
+  assert.strictEqual(
+    decision(runGate({
+      tool_name: 'Edit', tool_input: { file_path: target },
+      cwd: proj, session_id: 'skip-cache', transcript_path: tpPlain,
+    })),
+    undefined, 'skip must persist via the approval cache (symmetric with cgc-check)'
+  );
+}
+
 console.log('smoke: all assertions passed');
