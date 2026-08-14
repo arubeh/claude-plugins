@@ -51,6 +51,12 @@ assert.ok(U.isTestPath('src/app.test.ts'));
 assert.ok(U.isTestPath('pkg/conftest.py'));
 assert.ok(!U.isTestPath('src/app.ts'));
 
+// `.claude/` 配下（ハーネス資産）はゲート対象外（儀式化対策・kbweb 実測 2026-08-13）
+assert.ok(U.isHarnessAssetPath('D:\\proj\\.claude\\hooks\\recall-cases.js'));
+assert.ok(U.isHarnessAssetPath('/home/u/proj/.claude/skills/x/scripts/a.js'));
+assert.ok(!U.isHarnessAssetPath('src/claude/module.rs'));
+assert.ok(!U.isHarnessAssetPath('D:\\proj\\src\\main.rs'));
+
 {
   // recentCgcToolUse: プラグイン名前空間の tool_use を検出し、TTL を尊重する。
   const proj = tmpProject();

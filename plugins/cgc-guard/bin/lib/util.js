@@ -109,6 +109,14 @@ function isCodeFile(p) {
   return CODE_EXTS.has(ext);
 }
 
+// ハーネス資産（`.claude/` 配下のフック・スクリプト・スキル等）か。
+// call graph の検査価値がほぼ無い一方、未インデックスのため [cgc-skip] マーカーだけが
+// 積み上がる「儀式化」の主因だった（kbweb 実測 2026-08-13: skip 多数・実検査ゼロ）。
+// ゲート対象から明示除外する（pre-edit-gate が参照）。
+function isHarnessAssetPath(p) {
+  return /[\\/]\.claude[\\/]/.test(String(p));
+}
+
 // テキストからコード拡張子を持つ path 風トークンを抽出（証跡の paths 用）。
 function extractCodePaths(text) {
   const out = new Set();
@@ -519,7 +527,7 @@ module.exports = {
   projectDir, cgcDir, graphFile, metaFile, tmpDir,
   evidenceFile, denyStateFile, indexStampFile, indexLockDir, watcherHeartbeatFile,
   isParticipating, resolveCgcBin, cgcAvailable, isWatcherLive,
-  isCodeFile, extractCodePaths, lastAssistantText, recentCgcToolUse,
+  isCodeFile, isHarnessAssetPath, extractCodePaths, lastAssistantText, recentCgcToolUse,
   normPathKey, isConfirmedUnindexed, isDeclarationOnlyAddition, isTestOnlyAddition,
   loadGuardConfig, isTestPath, recordApproval, isApproved,
   acquireLock, sleepSync,

@@ -30,6 +30,9 @@ function main() {
   const target = resolveTarget(input);
   if (!target) return;
   if (!U.isCodeFile(target)) return; // docs/設定 waiver
+  // `.claude/` 配下（ハーネス資産）は対象外 — 未インデックスで [cgc-skip] の儀式だけが
+  // 積み上がっていたため明示除外（kbweb 実測 2026-08-13）。
+  if (U.isHarnessAssetPath(target)) return;
   if (cfg.excludeTests && U.isTestPath(target)) return; // テスト編集は対象外 (#189-1)
   if (input.tool_name === 'Write' && !exists(target)) return; // 新規ファイルは既存シンボルへの影響なし
 
