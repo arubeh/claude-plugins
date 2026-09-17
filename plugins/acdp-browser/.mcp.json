@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "acdp": {
-      "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/mcp-guard.js"]
-    }
-  }
-}

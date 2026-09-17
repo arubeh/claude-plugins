@@ -8,7 +8,6 @@ arubeh の **Claude Code プラグイン marketplace**（クローズド配布�
 | プラグイン | 説明 |
 |-----------|------|
 | [`cgc-guard`](plugins/cgc-guard/) | cgc (Code Graph Context) 連携。コード編集前の影響範囲確認（context+impact）を PreToolUse ゲートで強制し、編集・git 操作のたびに graph へ差分を自動適用。インストール=オプトイン・未参加PJ（`.cgc` 無し）では no-op。 |
-| [`acdp-browser`](plugins/acdp-browser/) | acdp (Browser/CDP) の MCP 提供。Playwright MCP 互換の `browser_*` ツールでブラウザを直接操作（UI 動作確認・E2E・`/ui-test`）。acdp バイナリ不在の環境では 0 tools で静かに無効化（`.acdp-disabled` で PJ 単位オプトアウト）。 |
 
 ---
 
@@ -26,7 +25,6 @@ arubeh の **Claude Code プラグイン marketplace**（クローズド配布�
    ```
    /plugin marketplace add arubeh/claude-plugins
    /plugin install cgc-guard@arubeh-plugins
-   /plugin install acdp-browser@arubeh-plugins
    ```
 
    - marketplace 名 `arubeh-plugins` は `marketplace.json` の `name`（リポジトリ名 `claude-plugins` とは別物なので注意）。プラグインは `<プラグイン名>@arubeh-plugins` で参照。
@@ -90,4 +88,3 @@ claude --plugin-dir /path/to/claude-plugins/plugins/cgc-guard
 プラグインごとの詳細は各 README を参照:
 
 - [plugins/cgc-guard/README.md](plugins/cgc-guard/README.md) — できること・前提・スキル一覧
-- [plugins/acdp-browser/README.md](plugins/acdp-browser/README.md) — できること・前提・オプトアウト

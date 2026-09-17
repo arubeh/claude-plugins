@@ -12,19 +12,12 @@ arubeh の **Claude Code プラグイン marketplace**（クローズド配布�
 claude-plugins/
 ├── .claude-plugin/marketplace.json   marketplace 定義（name / plugins 一覧・各 version）
 ├── plugins/
-│   ├── cgc-guard/                    cgc 連携（編集前 impact ゲート + 差分 index 自動化）
-│   │   ├── .claude-plugin/plugin.json   マニフェスト（version はここと marketplace.json の両方）
-│   │   ├── hooks/hooks.json             SessionStart / PreToolUse / PostToolUse
-│   │   ├── .mcp.json                    cgc（mcp-guard 経由・未参加 PJ は 0 tools）
-│   │   ├── bin/                         フック実装（Node・依存ゼロ）
-│   │   └── skills/                      /cgc-impact /cgc-refresh
-│   └── acdp-browser/                 acdp (Browser/CDP) の MCP 提供 + UI テストワークフロー
-│       ├── .claude-plugin/plugin.json   マニフェスト（version 2 箇所同期は同様）
-│       ├── .mcp.json                    acdp（mcp-guard 経由・バイナリ不在は 0 tools）
-│       ├── bin/mcp-guard.js             起動ガード（.acdp-disabled でオプトアウト）
-│       ├── agents/                      ui-tester（UI テスト実行サブエージェント）
-│       └── skills/                      /ui-test（仕様書ベースの UI テスト）
-├── .mcp.json                         このリポで開発するときの MCP（acdp / cgc）
+│   └── cgc-guard/                    cgc 連携（編集前 impact ゲート + 差分 index 自動化）
+│       ├── .claude-plugin/plugin.json   マニフェスト（version はここと marketplace.json の両方）
+│       ├── hooks/hooks.json             SessionStart / PreToolUse / PostToolUse
+│       ├── .mcp.json                    cgc（mcp-guard 経由・未参加 PJ は 0 tools）
+│       ├── bin/                         フック実装（Node・依存ゼロ）
+│       └── skills/                      /cgc-impact /cgc-refresh
 └── README.md                         インストール・配布手順（ユーザー向け）
 ```
 
@@ -38,16 +31,16 @@ CLAUDE.md には書かない。
 - **依存ゼロ原則**: フック実装（`bin/`）は Node 組み込みモジュールのみ。npm 依存を追加しない
   （ユーザー環境でのインストールを `claude` 同梱 Node だけで完結させるため）。
 - **未参加 PJ では no-op**: プラグインはインストール＝オプトイン。前提が無い環境（cgc-guard なら
-  `.cgc` 無し・`.cgc-disabled` あり／acdp-browser なら acdp バイナリ不在・`.acdp-disabled`）では fail-open / no-op を維持すること。
+  `.cgc` 無し・`.cgc-disabled` あり）では fail-open / no-op を維持すること。
 - **動作確認はローカル読み込みで**: marketplace を経由せず
   `claude --plugin-dir <repo>/plugins/<name>` で起動して検証する。
 
 ## Tools / MCP
 
-ルートの `.mcp.json` で開発時に使い得る MCP:
+ルートに `.mcp.json` は置かない。開発時に使い得る MCP:
 
 - **cgc** — コード構造・依存解析。`bin/*.js` 編集前の影響確認に使える（小規模なので必須ではない）。
-- **acdp** — ブラウザ自動操作。本リポでは通常不要。
+- ブラウザ操作は Claude Code 標準の Claude in Chrome を使う（旧 acdp-browser プラグインは 2026-09-18 に廃止）。
 
 ## 回答スタイル
 
